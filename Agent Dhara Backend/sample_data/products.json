@@ -1,0 +1,7 @@
+[
+  {"sku": "SKU001", "price": "29.99", "category": "  Electronics  ", "in_stock": true},
+  {"sku": "SKU002", "price": 19.50, "category": "Books", "in_stock": false},
+  {"sku": "SKU003", "price": "not-a-number", "category": "Home", "in_stock": true},
+  {"sku": null, "price": 49.99, "category": "Sports", "in_stock": true},
+  {"sku": "SKU005", "price": 0, "category": "  Clearance  ", "in_stock": null}
+]

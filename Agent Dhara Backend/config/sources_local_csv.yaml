@@ -1,0 +1,6 @@
+# Local CSV from Documents folder. Use with --skip-azure.
+source:
+  name: local_csv
+  locations:
+    - type: filesystem
+      path: C:\Users\dkish\OneDrive\Documents

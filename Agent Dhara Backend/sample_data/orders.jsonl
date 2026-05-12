@@ -1,0 +1,5 @@
+{"order_id": "ORD001", "customer_id": 101, "amount": "99.50", "status": "  pending  "}
+{"order_id": "ORD002", "customer_id": 102, "amount": 150, "status": "shipped"}
+{"order_id": "ORD003", "customer_id": null, "amount": "invalid", "status": "pending"}
+{"order_id": "ORD004", "customer_id": 104, "amount": 75.25, "status": null}
+{"order_id": "ORD005", "customer_id": 105, "amount": -10, "status": "cancelled"}

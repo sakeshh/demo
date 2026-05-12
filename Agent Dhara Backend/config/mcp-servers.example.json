@@ -1,0 +1,49 @@
+{
+  "mcpServers": {
+    "agent-dhara-data-all": {
+      "command": "REPLACE_WITH_PYTHON_EXE",
+      "args": ["-m", "mcp_server.agent_dhara_data_mcp"],
+      "cwd": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+      "env": {
+        "AGENT_DHARA_PROJECT_ROOT": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+        "AGENT_DHARA_SOURCES_PATH": "config/sources.yaml"
+      }
+    },
+    "agent-dhara-azure-sql": {
+      "command": "REPLACE_WITH_PYTHON_EXE",
+      "args": ["-m", "mcp_server.mcp_azure_sql"],
+      "cwd": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+      "env": {
+        "AGENT_DHARA_PROJECT_ROOT": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+        "AGENT_DHARA_SOURCES_PATH": "config/sources.yaml"
+      }
+    },
+    "agent-dhara-azure-blob": {
+      "command": "REPLACE_WITH_PYTHON_EXE",
+      "args": ["-m", "mcp_server.mcp_azure_blob"],
+      "cwd": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+      "env": {
+        "AGENT_DHARA_PROJECT_ROOT": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+        "AGENT_DHARA_SOURCES_PATH": "config/sources.yaml"
+      }
+    },
+    "agent-dhara-local-fs": {
+      "command": "REPLACE_WITH_PYTHON_EXE",
+      "args": ["-m", "mcp_server.mcp_local_fs"],
+      "cwd": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+      "env": {
+        "AGENT_DHARA_PROJECT_ROOT": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+        "AGENT_DHARA_SOURCES_PATH": "config/sources.yaml"
+      }
+    },
+    "agent-dhara-stream": {
+      "command": "REPLACE_WITH_PYTHON_EXE",
+      "args": ["-m", "mcp_server.mcp_stream"],
+      "cwd": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+      "env": {
+        "AGENT_DHARA_PROJECT_ROOT": "REPLACE_WITH_ABSOLUTE_PATH_TO_PROJECT_ROOT",
+        "AGENT_DHARA_SOURCES_PATH": "config/sources.yaml"
+      }
+    }
+  }
+}

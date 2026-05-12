@@ -1,0 +1,62 @@
+# Core
+pandas>=1.5.0
+pyyaml>=6.0
+openpyxl>=3.0.0
+python-dotenv>=1.0.0
+
+# Azure Blob Storage
+azure-storage-blob>=12.0.0
+
+# Optional: Azure Identity (managed identity)
+azure-identity>=1.12.0
+
+# Azure OpenAI client support
+openai>=1.0.0
+
+# Optional HTTP APIs
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+
+# MCP — stdio servers:
+#   python -m mcp_server.agent_dhara_data_mcp   (all tools)
+#   python -m mcp_server.mcp_azure_sql|mcp_azure_blob|mcp_local_fs|mcp_stream
+mcp>=1.2.0
+
+# LangGraph — multi-agent orchestration
+langgraph>=0.2.0
+
+# ── Sprint 1 Upgrades ─────────────────────────────────────────────────────
+
+# LangChain ToolCallingAgent — replaces keyword routing with LLM-native tool selection
+# Docs: https://python.langchain.com/docs/how_to/tool_calling/
+langchain-core>=0.2.0
+langchain-openai>=0.1.0       # Azure OpenAI + OpenAI LLM binding for LangChain
+
+# LangSmith — LLM tracing, debugging, and evaluation
+# Enable by setting: LANGCHAIN_TRACING_V2=true + LANGCHAIN_API_KEY=<key>
+# Docs: https://docs.smith.langchain.com/
+langsmith>=0.1.0
+
+# YData Profiling (formerly pandas-profiling) — richer dataset assessment engine
+# Usage: from agent.specialists.ydata_profiler import enrich_assessment_with_profile
+# Docs: https://docs.profiling.ydata.ai/
+ydata-profiling>=4.0.0
+
+# Sweetviz — visual cross-dataset EDA comparison reports
+# Usage: from agent.specialists.cross_dataset_agent import generate_sweetviz_comparison
+# Docs: https://github.com/fbdesignpro/sweetviz
+sweetviz>=2.3.0
+
+# Great Expectations — data quality validation
+great_expectations>=0.17.0
+
+# ─────────────────────────────────────────────────────────────────────────
+
+# Optional: Azure SQL via pythonnet (install pythonnet + .NET SDK separately on your OS)
+pythonnet>=3.0.0
+clr-loader>=0.2.6
+
+# Optional: Word-to-number conversion (e.g. "one hundred" -> 100)
+word2number>=1.1

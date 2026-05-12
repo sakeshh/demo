@@ -1,0 +1,249 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #eaf6ff;
+  --foreground: #0a0a0a;
+}
+
+html {
+  font-size: 81%;
+  scroll-behavior: smooth;
+  margin: 0;
+  min-height: 100dvh;
+  height: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  height: 100%;
+  color: var(--foreground);
+  background: var(--background);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  overflow-x: hidden;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  /* Fills visible viewport on mobile (avoids gap under 100vh layouts) */
+  .min-h-dvh {
+    min-height: 100dvh;
+  }
+  .h-dvh {
+    height: 100dvh;
+  }
+}
+
+/* vh first = fallback when dvh is unsupported (otherwise height can collapse) */
+.min-h-viewport {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+.h-viewport {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* Subtle fade-in animation utility */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.4s ease-out forwards;
+}
+
+/* Skeleton shimmer for loading states */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.animate-skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgb(0 0 0 / 0.06) 25%,
+    rgb(0 0 0 / 0.1) 50%,
+    rgb(0 0 0 / 0.06) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* Infinite-loop horizontal wave — slower, cinematic */
+@keyframes infinite-loop-wave {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-infinite-loop-wave {
+  animation: infinite-loop-wave 28s linear infinite;
+}
+
+/* Thread bundle — same seamless loop, slightly slower for depth */
+.animate-thread-flow {
+  animation: infinite-loop-wave 32s linear infinite;
+}
+
+.animate-thread-flow-slow {
+  animation: infinite-loop-wave 42s linear infinite;
+}
+
+/* Particle drift — slow, organic movement for realism */
+@keyframes particle-drift-1 {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 0.25;
+  }
+  25% {
+    transform: translate(8px, -12px) scale(1.1);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translate(-5px, -20px) scale(0.95);
+    opacity: 0.3;
+  }
+  75% {
+    transform: translate(12px, -8px) scale(1.05);
+    opacity: 0.4;
+  }
+}
+
+@keyframes particle-drift-2 {
+  0%, 100% {
+    transform: translate(0, 0) scale(1);
+    opacity: 0.2;
+  }
+  33% {
+    transform: translate(-15px, 10px) scale(1.08);
+    opacity: 0.35;
+  }
+  66% {
+    transform: translate(6px, 18px) scale(0.92);
+    opacity: 0.28;
+  }
+}
+
+@keyframes particle-drift-3 {
+  0%, 100% {
+    transform: translate(0, 0);
+    opacity: 0.15;
+  }
+  50% {
+    transform: translate(20px, -15px);
+    opacity: 0.35;
+  }
+}
+
+.animate-particle-1 { animation: particle-drift-1 22s ease-in-out infinite; }
+.animate-particle-2 { animation: particle-drift-2 26s ease-in-out infinite; }
+.animate-particle-3 { animation: particle-drift-3 30s ease-in-out infinite; }
+
+/* Data stream / flow lines — diagonal lines moving across */
+@keyframes flow-line-stream {
+  0% { transform: translateX(100vw) rotate(-12deg); }
+  100% { transform: translateX(-100%) rotate(-12deg); }
+}
+
+/* Packet pulse — bright spots traveling along each line */
+@keyframes packet-pulse {
+  0% { background-position: 0 0, 0 0; }
+  100% { background-position: 0 0, 72px 0; }
+}
+
+.animate-flow-line {
+  animation: flow-line-stream 20s linear infinite, packet-pulse 2.4s linear infinite;
+}
+.animate-flow-line-slow {
+  animation: flow-line-stream 28s linear infinite, packet-pulse 3s linear infinite;
+}
+.animate-flow-line-fast {
+  animation: flow-line-stream 14s linear infinite, packet-pulse 1.8s linear infinite;
+}
+
+/* Reverse flow — left-to-right */
+@keyframes flow-line-stream-reverse {
+  0% { transform: translateX(-100%) rotate(-12deg); }
+  100% { transform: translateX(100vw) rotate(-12deg); }
+}
+
+.animate-flow-line-reverse {
+  animation: flow-line-stream-reverse 22s linear infinite, packet-pulse 2.6s linear infinite;
+}
+.animate-flow-line-reverse-slow {
+  animation: flow-line-stream-reverse 30s linear infinite, packet-pulse 3.2s linear infinite;
+}
+
+/* Badge pulse */
+@keyframes badge-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0, 112, 173, 0.3); }
+  50% { opacity: 0.9; box-shadow: 0 0 0 6px rgba(0, 112, 173, 0); }
+}
+
+.animate-badge-pulse {
+  animation: badge-pulse 2.5s ease-in-out infinite;
+}
+
+/* Vignette */
+.vignette-overlay {
+  background: radial-gradient(
+    ellipse 80% 70% at 50% 50%,
+    transparent 50%,
+    rgba(0, 0, 0, 0.08) 100%
+  );
+  pointer-events: none;
+}
+
+/* Subtle film grain / noise */
+.noise-overlay {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  opacity: 0.03;
+  pointer-events: none;
+}
+
+/* Reduced motion — disable or simplify animations */
+/* Visible scrollbar for options panels */
+.options-scroll {
+  overflow-y: scroll;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 112, 173, 0.55) rgba(0, 0, 0, 0.06);
+}
+.options-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+.options-scroll::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 10px;
+}
+.options-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 112, 173, 0.55);
+  border-radius: 10px;
+}
+.options-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 112, 173, 0.7);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-flow-line,
+  .animate-flow-line-slow,
+  .animate-flow-line-fast,
+  .animate-flow-line-reverse,
+  .animate-flow-line-reverse-slow {
+    animation: none;
+  }
+  .animate-badge-pulse {
+    animation: none;
+  }
+}

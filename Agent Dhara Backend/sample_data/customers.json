@@ -1,0 +1,9 @@
+[
+  {"id": 1, "name": "  Alice Smith  ", "email": "alice@example.com", "joined_date": "2024-01-15"},
+  {"id": 2, "name": "Bob Jones", "email": "bob.example.com", "joined_date": "2024-02-20"},
+  {"id": null, "name": "Charlie Brown", "email": "charlie@test.org", "joined_date": "invalid"},
+  {"id": 4, "name": "Diana Ross", "email": null, "joined_date": "2024-04-10"},
+  {"id": 5, "name": "  Eve Davis  ", "email": "eve@mail.com", "joined_date": "15-01-2024"},
+  {"id": 6, "name": "Frank Lee", "email": "frank@co.uk", "joined_date": "2024-06-01"},
+  {"id": "seven", "name": "Grace Kim", "email": "grace@example.com", "joined_date": "2024-07-12"}
+]

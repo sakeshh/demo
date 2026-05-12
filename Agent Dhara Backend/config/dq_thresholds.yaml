@@ -1,0 +1,130 @@
+# Data quality thresholds (used by assessment engine when loaded).
+# Adjust per environment (e.g. stricter in prod, looser in dev).
+
+severity:
+  # Null/placeholder: above this fraction of rows → high severity
+  null_pct_high: 0.25
+  null_pct_medium: 0.10
+
+  # Duplicate rows: above this fraction → high severity
+  duplicate_row_pct_high: 0.05
+  duplicate_row_pct_warn: 0.02
+
+  # Invalid numeric/date: above this fraction → high severity
+  invalid_numeric_pct_high: 0.10
+  invalid_date_pct_high: 0.20
+
+mixed_types:
+  # Column considered "mixed" when numeric parse rate is in (low, high)
+  parse_rate_low: 0.20
+  parse_rate_high: 0.80
+
+chunking:
+  # Process files in chunks when row count exceeds this (0 = disable)
+  chunk_rows: 0
+  chunk_size: 50000
+
+parallelism:
+  # Max concurrent blob downloads / assessments (0 = sequential)
+  max_workers: 4
+
+# Extended checks (structure, outliers, strings, dates, cardinality).
+# Set disabled: true to turn off the block below (standard column DQ still runs).
+extended_checks:
+  disabled: false
+  # One value accounts for this share → dominant_value_skew
+  dominant_value_pct: 0.92
+  # Flag IQR outliers when at least this fraction of rows are outliers
+  outlier_row_fraction_warn: 0.003
+  # Cap rows used for IQR / skew / string scans (full df if smaller)
+  max_rows_heavy: 100000
+  # Very long string threshold (characters)
+  extreme_string_len: 4000
+  # Column count above this → very_wide_table (low)
+  wide_table_columns: 200
+  # |skew| above this → skewed_distribution (low)
+  skew_threshold: 2.0
+
+# Summarize repeated invalid tokens as systematic placeholders.
+systematic_placeholders:
+  min_count: 5
+  min_pct: 0.02
+  top_k: 5
+
+# Domain/range rules (applied to numeric-parsed values).
+domain_rules:
+  rules:
+    - column: "age"
+      min: 18
+      max: 80
+      severity: "medium"
+    - column: "salary"
+      min: 1
+      severity: "medium"
+
+# Relationship inference: by default only key-like columns are used.
+relationships:
+  include_non_key_columns: false
+  orphan_only_if_same_dataset: true
+  same_dataset_min_id_overlap_ratio: 0.90
+  same_dataset_max_rowcount_diff_ratio: 0.10
+
+# Duplicate detection (same schema + high ID overlap).
+duplicate_detection:
+  min_id_overlap_ratio: 0.95
+  max_rowcount_diff_ratio: 0.05
+
+# Business-first summary section
+executive_summary:
+  max_items: 8
+
+# Per-dataset DQ score (0-100) weighting
+dq_score:
+  weights:
+    high: 3.0
+    medium: 1.0
+    low: 0.3
+
+# Optional: custom rules (applied after standard DQ)
+# custom_rules:
+#   - dataset: "*"              # or specific dataset name
+#     column: "status"
+#     rule: "one_of"
+#     params: ["active", "inactive", "pending"]
+#   - dataset: "sales"
+#     column: "amount"
+#     rule: "range"
+#     params: { min: 0, max: 1000000 }
+#   - dataset: "*"
+#     column: "email"
+#     rule: "regex"
+#     params: "^[^@]+@[^@]+\\.[^@]+$"
+#   - dataset: "orders"
+#     column: "order_id"
+#     rule: "not_null"
+#     params: {}
+
+# Cross-column conditional business rules (after standard DQ checks). Default: none enabled.
+conditional_rules: []
+#
+# conditional_rules:
+#   - type: conditional_not_null
+#     when_column: status
+#     when_value: "shipped"
+#     then_column: ship_date
+#     severity: high
+#
+#   - type: conditional_format
+#     when_column: country
+#     when_value: "IN"
+#     then_column: phone
+#     then_regex: '^[6-9]\\d{9}$'
+#     severity: medium
+#
+#   - type: mutual_exclusion
+#     columns: [refund_amount, discount_amount]
+#     severity: high
+#
+#   - type: at_least_one
+#     columns: [email, phone, address]
+#     severity: medium

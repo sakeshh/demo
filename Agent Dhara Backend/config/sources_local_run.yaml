@@ -1,0 +1,6 @@
+# Local demo: filesystem only (no Azure/SQL). Use: --sources config/sources_local_run.yaml --skip-azure
+source:
+  name: local_demo
+  locations:
+    - type: filesystem
+      path: sample_data

@@ -1,0 +1,8 @@
+# Local-only sources (no Azure, no database). Use with --skip-azure.
+# Data is read from the sample_data/ folder.
+
+source:
+  name: local_sample
+  locations:
+    - type: filesystem
+      path: sample_data

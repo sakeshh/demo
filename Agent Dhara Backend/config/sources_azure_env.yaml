@@ -1,0 +1,32 @@
+# Azure-ready config (NO secrets in file).
+# Values are expanded from environment variables like ${VAR}.
+
+source:
+  name: enterprise_data
+  locations:
+    - type: database
+      id: primary
+      connector: azure_sql_pythonnet
+      connection:
+        server: ${AZURE_SQL_SERVER}
+        database: ${AZURE_SQL_DATABASE}
+        username: ${AZURE_SQL_USERNAME}
+        password: ${AZURE_SQL_PASSWORD}
+
+    - type: azure_blob
+      id: assessment_input
+      connector: azure_blob_storage
+      connection:
+        account_name: ${AZURE_STORAGE_ACCOUNT_NAME}
+        account_key: ${AZURE_STORAGE_ACCOUNT_KEY}
+        # If you prefer connection string auth, set AZURE_STORAGE_CONNECTION_STRING and you can leave account_key blank.
+        connection_string: ${AZURE_STORAGE_CONNECTION_STRING:}
+        container: ${AZURE_ASSESSMENT_CONTAINER:assessment}
+
+    - type: azure_blob_output
+      connector: azure_blob_storage
+      connection:
+        account_name: ${AZURE_STORAGE_ACCOUNT_NAME}
+        account_key: ${AZURE_STORAGE_ACCOUNT_KEY}
+        connection_string: ${AZURE_STORAGE_CONNECTION_STRING:}
+        container: ${AZURE_OUTPUT_CONTAINER:output}

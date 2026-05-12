@@ -1,0 +1,18 @@
+# Example: run assessment or an MCP server in a container.
+# Build: docker build -f Dockerfile.example -t agent-dhara .
+# Run MCP (Blob only): docker run --rm -e AGENT_DHARA_PROJECT_ROOT=/app -v "%cd%:/app" -w /app agent-dhara python -m mcp_server.mcp_azure_blob
+# Run main (menu needs -it): docker run --rm -it -e AGENT_DHARA_PROJECT_ROOT=/app -v "%cd%:/app" -w /app agent-dhara python main.py --sources config/sources.yaml
+
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+ENV AGENT_DHARA_PROJECT_ROOT=/app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Default: show help (override CMD per use case)
+CMD ["python", "main.py", "--help"]
