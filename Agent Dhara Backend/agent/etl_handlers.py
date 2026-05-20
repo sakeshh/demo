@@ -39,6 +39,7 @@ from agent.etl_pipeline.manual_review_promote import (
     count_pending_manual_review,
     enrich_plan_manual_review,
 )
+from agent.etl_pipeline.agentic_rules import analyze_agentic_intent
 
 logger = logging.getLogger("agent.etl")
 
@@ -81,13 +82,13 @@ ETL_PHASES = [
 
 ALLOWED_TRANSITIONS: Dict[str, List[str]] = {
     "planned": ["preview_ready", "failed"],
-    "preview_ready": ["approved", "failed"],
-    "approved": ["generating", "failed"],
-    "generating": ["validated", "failed"],
-    "validated": ["code_ready", "failed"],
-    "code_ready": ["downloadable", "failed"],
+    "preview_ready": ["approved", "failed", "planned"],
+    "approved": ["generating", "failed", "planned"],
+    "generating": ["validated", "failed", "planned"],
+    "validated": ["code_ready", "failed", "planned"],
+    "code_ready": ["downloadable", "failed", "planned"],
     "failed": ["planned"],
-    "downloadable": [],
+    "downloadable": ["planned"],
 }
 
 _LEGACY_PHASE_MAP = {
@@ -275,13 +276,40 @@ def etl_plan_start(
     ctx["connector_manifest"] = manifest
 
     t0 = time.time()
-    plan = build_etl_plan(
+    
+    # --- Agentic Intelligence Pass ---
+    # First, build a draft plan to generate the initial manual review queue
+    draft_plan = build_etl_plan(
         assess,
         rules_merged,
         engine=engine,
         source_context=src_ctx,
     )
-    plan = enrich_plan_manual_review(plan)
+    draft_plan = enrich_plan_manual_review(draft_plan)
+    
+    agentic_result = analyze_agentic_intent(draft_plan, rules_merged)
+    
+    updated_rules = agentic_result.get("updated_business_rules") or {}
+    if updated_rules:
+        logger.info(f"Agentic rules override applied: {updated_rules}")
+        rules_merged.update(updated_rules)
+        # Re-build plan with updated structured toggles
+        plan = build_etl_plan(
+            assess,
+            rules_merged,
+            engine=engine,
+            source_context=src_ctx,
+        )
+        plan = enrich_plan_manual_review(plan)
+    else:
+        plan = draft_plan
+        
+    resolutions = agentic_result.get("manual_review_resolutions") or []
+    if resolutions:
+        logger.info(f"Agentic manual review auto-resolution applied: {len(resolutions)} items")
+        plan, res_errs = apply_manual_resolutions(plan, resolutions)
+        if res_errs:
+            logger.warning(f"Agentic auto-resolution errors: {res_errs}")
     plan["connector_manifest"] = manifest
     plan["source_context"] = src_ctx
     plan["etl_intent"] = {
