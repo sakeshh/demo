@@ -78,6 +78,7 @@ def run_assessment(
     dq_thresholds_path: Optional[str] = None,
     job_id: Optional[str] = None,
     max_rows: Optional[int] = None,
+    approved_semantics: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Run the full data-quality assessment from the given config string.
 
@@ -92,6 +93,7 @@ def run_assessment(
         dq_thresholds_path=dq_thresholds_path,
         job_id=job_id,
         max_rows=max_rows,
+        approved_semantics=approved_semantics,
     )
 
 

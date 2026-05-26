@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaDatabase, FaFileAlt, FaChartBar, FaCode, FaCheck, FaArrowLeft, FaDownload, FaEye, FaArrowRight, FaClipboardList } from 'react-icons/fa';
+import { FaDatabase, FaFileAlt, FaChartBar, FaCode, FaCheck, FaArrowLeft, FaDownload, FaEye, FaArrowRight, FaClipboardList, FaTags } from 'react-icons/fa';
 import { useRouter } from 'next/navigation';
 import AnimatedBackground from '@/components/AnimatedBackground';
 import DatabaseSelector from '@/components/DatabaseSelector';
@@ -11,7 +11,8 @@ import DataAssessmentReport from '@/components/DataAssessmentReport';
 import EtlGenerationPanel from '@/components/EtlGenerationPanel';
 import DataCleaner from '@/components/DataCleaner';
 import Confetti from '@/components/Confetti';
-type Step = 'database' | 'files' | 'requirements' | 'assessment' | 'report' | 'etl' | 'cleaning' | 'complete';
+import SemanticReviewPanel from '@/components/SemanticReviewPanel';
+type Step = 'database' | 'files' | 'semantics' | 'assessment' | 'report' | 'requirements' | 'etl' | 'cleaning' | 'complete';
 
 function generateHtmlReportFromBackend(html: string): string {
   return html || '<!doctype html><html><head><meta charset="utf-8" /></head><body>No HTML report available.</body></html>';
@@ -41,6 +42,7 @@ export default function DataPipelinePage() {
   const [includeTransformSuggestions, setIncludeTransformSuggestions] = useState<boolean>(true);
   const [includeDqRecommendations, setIncludeDqRecommendations] = useState<boolean>(true);
   const [etlSessionId, setEtlSessionId] = useState('default');
+  const [approvedSemantics, setApprovedSemantics] = useState<Record<string, Record<string, string>> | null>(null);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -55,6 +57,7 @@ export default function DataPipelinePage() {
   const steps = [
     { id: 'database', label: 'Database', icon: FaDatabase },
     { id: 'files', label: 'Files', icon: FaFileAlt },
+    { id: 'semantics', label: 'Semantics', icon: FaTags },
     { id: 'assessment', label: 'Assessment', icon: FaChartBar },
     { id: 'report', label: 'Report', icon: FaChartBar },
     { id: 'requirements', label: 'Requirements', icon: FaClipboardList },
@@ -71,6 +74,17 @@ export default function DataPipelinePage() {
   const handleFilesSelect = (files: string[], available: string[]) => {
     setSelectedFiles(files);
     setAvailableFiles(available);
+  };
+
+  const handleStartSemantics = () => {
+    setDirection('forward');
+    setCurrentStep('semantics');
+  };
+
+  const handleSemanticsComplete = (semantics: Record<string, Record<string, string>>) => {
+    setApprovedSemantics(semantics);
+    setDirection('forward');
+    setCurrentStep('assessment');
   };
 
   const handleStartAssessment = () => {
@@ -242,8 +256,20 @@ export default function DataPipelinePage() {
               <FileSelector
                 database={selectedDatabase}
                 onSelect={handleFilesSelect}
-                onNext={handleStartAssessment}
+                onNext={handleStartSemantics}
                 selectedFiles={selectedFiles}
+              />
+            )}
+
+            {currentStep === 'semantics' && selectedDatabase && (
+              <SemanticReviewPanel
+                database={selectedDatabase}
+                files={selectedFiles}
+                onComplete={handleSemanticsComplete}
+                onBack={() => {
+                  setDirection('back');
+                  setCurrentStep('files');
+                }}
               />
             )}
 
@@ -258,6 +284,7 @@ export default function DataPipelinePage() {
                   onIncludeDqRecommendationsChange={setIncludeDqRecommendations}
                   onComplete={handleAssessmentComplete}
                   onFeedback={(liked, comment) => handleFeedback('assessment', liked, comment)}
+                  approvedSemantics={approvedSemantics || undefined}
                 />
                 {assessmentData && (
                   <motion.button

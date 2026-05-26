@@ -135,9 +135,56 @@ def _emit_spark(action: str, col: str | None, df: str, step_meta: Optional[Dict[
     if act == "noop":
         return [f"# Column {col}: no transform"]
     if act == "validate_referential_integrity_or_stage":
-        mode = params.get("enforcement_mode") or "flag"
         rel_ds = params.get("related_dataset") or "?"
-        return [f"# RI {col} -> {rel_ds} (mode={mode}); route orphans to quarantine sink"]
+        rel_col = params.get("related_column") or "?"
+        mode = params.get("enforcement_mode") or "flag"
+        fk_action = params.get("fk_action") or "flag"
+        
+        lines = [
+            f"# Referential integrity check: {col} -> {rel_ds}.{rel_col} (action={fk_action}, mode={mode})",
+            f"if all_dfs is not None and {repr(rel_ds)} in all_dfs:",
+            f"    _parent_df = all_dfs[{repr(rel_ds)}]",
+            f"    if {repr(rel_col)} in _parent_df.columns:",
+            f"        _parent_keys = _parent_df.select(F.col({repr(rel_col)}).alias('_parent_key')).filter(F.col('_parent_key').isNotNull()).distinct()",
+            f"        {df} = {df}.join(_parent_keys, F.col({repr(col)}) == _parent_keys['_parent_key'], 'left')",
+            f"        _orphan_count = {df}.filter(F.col('_parent_key').isNull() & F.col({repr(col)}).isNotNull()).count()",
+            f"        if _orphan_count > 0:",
+            f"            logger.warning(f'Found {{_orphan_count}} orphan values in {col} referencing {rel_ds}.{rel_col}')",
+        ]
+        if fk_action == "reject_orphans":
+            lines.extend([
+                f"            # Action: reject_orphans",
+                f"            {df} = {df}.filter(F.col('_parent_key').isNotNull() | F.col({repr(col)}).isNull())",
+                f"            logger.info(f'Dropped {{_orphan_count}} orphan rows')",
+            ])
+        elif fk_action == "null_fill_fk":
+            lines.extend([
+                f"            # Action: null_fill_fk",
+                f"            {df} = {df}.withColumn({repr(col)}, F.when(F.col('_parent_key').isNull() & F.col({repr(col)}).isNotNull(), F.lit(None)).otherwise(F.col({repr(col)})))",
+                f"            logger.info(f'Null-filled {{_orphan_count}} orphan values')",
+            ])
+        elif fk_action == "create_unknown_dim_record":
+            lines.extend([
+                f"            # Action: create_unknown_dim_record",
+                f"            _orphans = {df}.filter(F.col('_parent_key').isNull() & F.col({repr(col)}).isNotNull()).select(F.col({repr(col)}).alias({repr(rel_col)})).distinct()",
+                f"            _new_rows = _orphans",
+                f"            for _c in _parent_df.columns:",
+                f"                if _c != {repr(rel_col)}:",
+                f"                    _new_rows = _new_rows.withColumn(_c, F.lit(None).cast(_parent_df.schema[_c].dataType))",
+                f"            all_dfs[{repr(rel_ds)}] = _parent_df.unionByName(_new_rows)",
+                f"            logger.info(f'Created unknown dimension records in {rel_ds}')",
+            ])
+        else:
+            lines.extend([
+                f"            # Action: flag / warn only",
+                f"            pass",
+            ])
+        lines.extend([
+            f"        {df} = {df}.drop('_parent_key')",
+            f"else:",
+            f"    logger.warning(f'Skipped referential integrity check for {col} -> {rel_ds}.{rel_col} (parent dataset not loaded)')",
+        ])
+        return lines
     return [f"# Unsupported in pyspark template v1: {act} on {col}"]
 
 
@@ -212,7 +259,7 @@ def generate_pyspark_etl(plan: Dict[str, Any], assessment: Dict[str, Any]) -> st
 
     for ds_name, block in (plan.get("datasets") or {}).items():
         fn = f"transform_{_safe(ds_name)}"
-        lines.append(f"def {fn}(df: DataFrame) -> DataFrame:")
+        lines.append(f"def {fn}(df: DataFrame, all_dfs: dict | None = None) -> DataFrame:")
         var = "out"
         lines.append(f"    {var} = df")
         for st in sorted(block.get("steps") or [], key=lambda x: int(x.get("order") or 0)):
@@ -239,7 +286,7 @@ def generate_pyspark_etl(plan: Dict[str, Any], assessment: Dict[str, Any]) -> st
         for ds_name in (plan.get("datasets") or {}):
             fn = f"transform_{_safe(ds_name)}"
             lines.append(f'    if "{ds_name}" in dfs:')
-            lines.append(f'        dfs["{ds_name}"] = {fn}(dfs["{ds_name}"])')
+            lines.append(f'        dfs["{ds_name}"] = {fn}(dfs["{ds_name}"], dfs)')
             if non_nullable:
                 lines.append(f'        _warn_nulls_in_columns(dfs["{ds_name}"], {non_nullable!r}, "{ds_name}")')
             lines.append(f'        _log_row_count(dfs["{ds_name}"], "{ds_name}")')

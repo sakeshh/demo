@@ -40,10 +40,11 @@ def emit_python_load_and_join(
 
     lines.append("def transform_all(dfs: dict) -> dict:")
     lines.append("    out = {}")
+    lines.append("    out.update(dfs)")
     for ds_name in ds_plan:
         fn = f"transform_{_safe(ds_name)}"
         lines.append(f"    if {repr(ds_name)} in dfs:")
-        lines.append(f"        out[{repr(ds_name)}] = {fn}(dfs[{repr(ds_name)}])")
+        lines.append(f"        out[{repr(ds_name)}] = {fn}(out[{repr(ds_name)}], out)")
     lines.append("    return out")
     lines.append("")
 

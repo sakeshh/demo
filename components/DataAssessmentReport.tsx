@@ -15,6 +15,7 @@ interface DataAssessmentReportProps {
   onIncludeDqRecommendationsChange?: (v: boolean) => void;
   onComplete: (data: any) => void;
   onFeedback: (liked: boolean, comment?: string) => void;
+  approvedSemantics?: Record<string, Record<string, string>>;
 }
 
 type Severity = 'high' | 'medium' | 'low';
@@ -97,6 +98,7 @@ export default function DataAssessmentReport({
   onIncludeDqRecommendationsChange,
   onComplete,
   onFeedback,
+  approvedSemantics,
 }: DataAssessmentReportProps) {
   const [assessing, setAssessing] = useState(true);
   const [progress, setProgress] = useState(0);
@@ -195,6 +197,10 @@ export default function DataAssessmentReport({
         context.last_local_file_list = files;
         context.selected_local_files = files;
         context.selected_fs_location_index = relIndex('filesystem', src.absIndex);
+      }
+
+      if (approvedSemantics) {
+        context.approved_semantics = approvedSemantics;
       }
 
       setProgress(25);

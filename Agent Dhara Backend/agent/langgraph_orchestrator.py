@@ -60,6 +60,7 @@ class OrchestratorState(TypedDict, total=False):
     transform_suggestions: Dict[str, Any]
     timings: Dict[str, Any]
     request_id: str
+    approved_semantics: Dict[str, Dict[str, str]]
 
 
 def _merge_timings(state: OrchestratorState, extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -99,6 +100,7 @@ async def _node_extract_async(state: OrchestratorState) -> OrchestratorState:
         stream_records=state.get("stream_records"),
         stream_name=state.get("stream_name") or "stream",
         job_id=state.get("job_id"),
+        approved_semantics=state.get("approved_semantics"),
     )
 
     # Normalize to JSON-serializable output (no dataclasses)
@@ -260,6 +262,7 @@ def run_orchestrator(
     stream_name: str = "stream",
     request_id: str = "",
     job_id: str = "",
+    approved_semantics: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
     High-level convenience wrapper.
@@ -275,6 +278,7 @@ def run_orchestrator(
             "request_id": request_id or "",
             "job_id": job_id or "",
             "timings": {},
+            "approved_semantics": approved_semantics or {},
         }
     )
     return dict(final)

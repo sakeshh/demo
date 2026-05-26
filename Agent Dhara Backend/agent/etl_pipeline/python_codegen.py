@@ -233,10 +233,56 @@ def _emit_ri(col: str, ds_var: str, p: Dict[str, Any]) -> List[str]:
     rel_ds = p.get("related_dataset") or "?"
     rel_col = p.get("related_column") or "?"
     mode = p.get("enforcement_mode") or "flag"
-    return [
-        f"# Referential integrity {col} -> {rel_ds}.{rel_col} (mode={mode})",
-        f"# Route orphans to quarantine table when mode=quarantine",
+    fk_action = p.get("fk_action") or "flag"
+    
+    c = _col_expr(col)
+    lines = [
+        f"# Referential integrity: {col} -> {rel_ds}.{rel_col} (action={fk_action}, mode={mode})",
+        f"if all_dfs is not None and {repr(rel_ds)} in all_dfs:",
+        f"    _parent_df = all_dfs[{repr(rel_ds)}]",
+        f"    if {repr(rel_col)} in _parent_df.columns:",
+        f"        _parent_keys = set(_parent_df[{repr(rel_col)}].dropna().unique())",
+        f"        _is_orphan = ~{ds_var}[{c}].isin(_parent_keys) & {ds_var}[{c}].notna()",
+        f"        _orphan_count = _is_orphan.sum()",
+        f"        if _orphan_count > 0:",
+        f"            logging.warning(f'Found {{_orphan_count}} orphan values in {col} referencing {rel_ds}.{rel_col}')",
     ]
+    
+    if fk_action == "reject_orphans":
+        lines.extend([
+            f"            # Action: reject_orphans",
+            f"            {ds_var} = {ds_var}[~_is_orphan]",
+            f"            logging.info(f'Dropped {{_orphan_count}} orphan rows')",
+        ])
+    elif fk_action == "null_fill_fk":
+        lines.extend([
+            f"            # Action: null_fill_fk",
+            f"            {ds_var}.loc[_is_orphan, {c}] = None",
+            f"            logging.info(f'Null-filled {{_orphan_count}} orphan values')",
+        ])
+    elif fk_action == "create_unknown_dim_record":
+        lines.extend([
+            f"            # Action: create_unknown_dim_record",
+            f"            _missing_keys = {ds_var}.loc[_is_orphan, {c}].dropna().unique()",
+            f"            if len(_missing_keys) > 0:",
+            f"                _new_rows = pd.DataFrame({{ {repr(rel_col)}: _missing_keys }})",
+            f"                for _col in _parent_df.columns:",
+            f"                    if _col != {repr(rel_col)}:",
+            f"                        _new_rows[_col] = None",
+            f"                all_dfs[{repr(rel_ds)}] = pd.concat([_parent_df, _new_rows], ignore_index=True)",
+            f"                logging.info(f'Created {{len(_missing_keys)}} unknown dimension records in {rel_ds}')",
+        ])
+    else:  # "flag" or "quarantine"
+        lines.extend([
+            f"            # Action: flag / warn only",
+            f"            pass",
+        ])
+        
+    lines.extend([
+        f"else:",
+        f"    logging.warning(f'Skipped referential integrity check for {col} -> {rel_ds}.{rel_col} (parent dataset not loaded)')",
+    ])
+    return lines
 
 
 def _emit_at_least_one(col: str, ds_var: str, _p: Dict[str, Any]) -> List[str]:
@@ -356,10 +402,11 @@ def _emit_run_all_example(plan: Dict[str, Any], manifest: Dict[str, Any]) -> Lis
         "    results = {}",
     ]
     for ds_name, entry in entries.items():
-        fn = f"transform_{_safe_ident(ds_name)}"
         read = python_read_snippet(entry if isinstance(entry, dict) else {"location": ds_name, "format": "csv"})
-        lines.append(f'    _raw = {read}')
-        lines.append(f'    results[{ds_name!r}] = {fn}(_raw)')
+        lines.append(f'    results[{ds_name!r}] = {read}')
+    for ds_name, entry in entries.items():
+        fn = f"transform_{_safe_ident(ds_name)}"
+        lines.append(f'    results[{ds_name!r}] = {fn}(results[{ds_name!r}], results)')
     lines.append("    return results")
     lines.append("")
     return lines
@@ -432,7 +479,7 @@ def generate_python_etl(plan: Dict[str, Any], assessment: Dict[str, Any]) -> str
     ds_plan = plan.get("datasets") or {}
     for ds_name, block in ds_plan.items():
         fn = f"transform_{_safe_ident(ds_name)}"
-        lines.append(f"def {fn}(df: pd.DataFrame) -> pd.DataFrame:")
+        lines.append(f"def {fn}(df: pd.DataFrame, all_dfs: dict | None = None) -> pd.DataFrame:")
         lines.append(f'    """Clean transforms for dataset: {ds_name}"""')
         ds_var = "out"
         lines.append(f"    {ds_var} = df.copy()")

@@ -317,6 +317,13 @@ def etl_plan_start(
         "target_path": target_path,
     }
 
+    # Compute ETL readiness and inject blockers if present
+    from agent.etl_readiness_scorer import compute_etl_readiness
+    readiness = compute_etl_readiness(assess)
+    assess["etl_readiness"] = readiness
+    if readiness["blockers"]:
+        plan["blocked"] = (plan.get("blocked") or []) + readiness["blockers"]
+
     flow = ctx.setdefault("etl_flow", {})
     narr_mode = os.getenv("ETL_NARRATOR_MODE", "tiered").strip().lower()
     use_llm_full = narr_mode in ("llm", "full") or os.getenv(

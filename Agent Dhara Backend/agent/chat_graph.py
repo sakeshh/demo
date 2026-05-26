@@ -2763,11 +2763,13 @@ def _node_assess_selected_local_files(state: ChatState) -> ChatState:
                 df = pd.read_json(p)
         dfs[name] = df
     pending_rules = state["session"].get("pending_business_rules") or ctx.get("pending_business_rules")
+    approved_sem = state["session"].get("approved_semantics") or ctx.get("approved_semantics")
     result = load_and_profile(
         {"name": "local", "locations": []},
         additional_data=dfs,
         max_rows=None,
         business_rules=pending_rules,
+        approved_semantics=approved_sem,
     )
     _override_source_root_for_datasets(result, list(dfs.keys()), os.path.abspath(root))
     # Only return the tabular report in chat (no legacy/freeform report text).
@@ -3174,6 +3176,7 @@ def _node_assess_selected_tables(state: ChatState) -> ChatState:
     conn = AzureSQLPythonNetConnector(conn_cfg)
     dfs = {t: conn.load_table(t, max_rows=None) for t in selected}
     pending_rules = state["session"].get("pending_business_rules") or ctx.get("pending_business_rules")
+    approved_sem = state["session"].get("approved_semantics") or ctx.get("approved_semantics")
     result = load_and_profile(
         {"name": source_root.get("name") or "source", "locations": []}, 
         additional_data=dfs, 
@@ -3181,6 +3184,7 @@ def _node_assess_selected_tables(state: ChatState) -> ChatState:
         max_rows=None,
         business_rules=pending_rules,
         db_connectors={t: conn for t in selected},
+        approved_semantics=approved_sem,
     )
     # Ensure source_root reflects Azure SQL (not azure_blob from `additional_data` default).
     label = (

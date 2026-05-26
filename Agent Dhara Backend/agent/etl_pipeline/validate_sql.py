@@ -66,8 +66,15 @@ def _tsql_transaction_blocks(source: str) -> List[str]:
     issues: List[str] = []
     if "begin try" in low and "end catch" not in low:
         issues.append("BEGIN TRY without matching END CATCH")
-    if "begin tran" in low and "commit" not in low:
-        issues.append("BEGIN TRAN without COMMIT")
+        
+    has_begin_tran = "begin tran" in low or "begin transaction" in low
+    has_commit = "commit" in low or "commit transaction" in low
+    has_rollback = "rollback" in low or "rollback transaction" in low
+    
+    if has_begin_tran and not has_commit:
+        issues.append("BEGIN TRANSACTION without COMMIT TRANSACTION")
+    if (has_commit or has_rollback) and not has_begin_tran:
+        issues.append("COMMIT/ROLLBACK TRANSACTION without BEGIN TRANSACTION")
     return issues
 
 

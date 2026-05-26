@@ -37,25 +37,33 @@ def build_step_params(
     params: Dict[str, Any] = {
         "execution_mode": "in_place",
     }
-    dtype = str(col_stats.get("dtype") or col_stats.get("semantic_type") or "")
+    dtype = str(col_stats.get("semantic_type") or col_stats.get("dtype") or "")
     strategy = str(rules.get("outlier_strategy") or "flag").lower()
 
     if act in ("fill_or_drop", "fill_nulls_simple"):
-        rec = evidence.get("recommended_fill") if isinstance(evidence, dict) else None
-        if rec in ("mean", "median"):
-            params["fill_strategy"] = rec
-        elif _is_numeric_dtype(dtype, col_stats):
-            params["fill_strategy"] = rec or "median"
-        elif _is_text_dtype(dtype, col_stats):
-            params["fill_strategy"] = "value"
-            params["fill_value"] = ""
-        else:
+        semantic_type = str(col_stats.get("semantic_type") or "").lower().strip()
+        
+        # ID, Date, Email, Phone should never be filled with metric defaults. Default to NULL.
+        if semantic_type in ("id", "date", "phone", "email"):
             params["fill_strategy"] = "value"
             params["fill_value"] = None
-        if evidence.get("median") is not None and params.get("fill_strategy") == "median":
-            params["fill_value"] = evidence["median"]
-        elif evidence.get("mean") is not None and params.get("fill_strategy") == "mean":
-            params["fill_value"] = evidence["mean"]
+        else:
+            rec = evidence.get("recommended_fill") if isinstance(evidence, dict) else None
+            if rec in ("mean", "median"):
+                params["fill_strategy"] = rec
+            elif _is_numeric_dtype(dtype, col_stats) and semantic_type == "metric":
+                params["fill_strategy"] = rec or "median"
+            elif _is_text_dtype(dtype, col_stats) or semantic_type == "text":
+                params["fill_strategy"] = "value"
+                params["fill_value"] = None  # Leave as NULL instead of empty string
+            else:
+                params["fill_strategy"] = "value"
+                params["fill_value"] = None
+
+            if evidence.get("median") is not None and params.get("fill_strategy") == "median":
+                params["fill_value"] = evidence["median"]
+            elif evidence.get("mean") is not None and params.get("fill_strategy") == "mean":
+                params["fill_value"] = evidence["mean"]
 
     elif act in ("flag_outliers", "clip_or_flag", "clip_outliers", "cap_outliers", "range_clip"):
         method = strategy if strategy in ("flag", "clip", "cap") else "flag"
@@ -109,9 +117,27 @@ def build_step_params(
 def build_ri_step_params(rstep: Dict[str, Any], rules: Dict[str, Any]) -> Dict[str, Any]:
     """Params for referential-integrity validation steps from relationship planner."""
     mode = "quarantine" if rules.get("never_drop_rows") else "flag"
+    
+    fk_actions = rules.get("fk_integrity_actions") or {}
+    ds = rstep.get("dataset") or ""
+    col = rstep.get("column") or ""
+    rel_ds = rstep.get("related_dataset") or ""
+    rel_col = rstep.get("related_column") or ""
+    
+    rel_key = f"{ds}.{col}->{rel_ds}.{rel_col}"
+    rel_key_clean = rel_key.replace("[", "").replace("]", "").replace("`", "").lower().strip()
+    
+    fk_action = "flag"
+    for k, act in fk_actions.items():
+        k_clean = str(k).replace("[", "").replace("]", "").replace("`", "").lower().strip()
+        if k_clean == rel_key_clean:
+            fk_action = act
+            break
+            
     return {
-        "related_dataset": rstep.get("related_dataset"),
-        "related_column": rstep.get("related_column"),
+        "related_dataset": rel_ds,
+        "related_column": rel_col,
         "enforcement_mode": mode,
         "execution_mode": "new_table",
+        "fk_action": fk_action
     }

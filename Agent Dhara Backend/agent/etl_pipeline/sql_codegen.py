@@ -48,6 +48,13 @@ def _classify_column(col_name: str, col_meta: dict) -> str:
     """
     Classify column as 'date', 'id', 'metric', 'categorical', or 'string'.
     """
+    # 0. Check approved semantic_type first if available
+    approved_tag = (col_meta.get("semantic_type") or "").lower().strip()
+    if approved_tag in ("id", "metric", "categorical", "date", "text"):
+        if approved_tag == "text":
+            return "string"
+        return approved_tag
+
     c_lower = str(col_name).lower()
     
     # 1. Date checks
@@ -86,13 +93,13 @@ def _classify_column(col_name: str, col_meta: dict) -> str:
     return "string"
 
 
-def compile_column_expression(col_name: str, transforms: List[dict], col_type: Optional[str], business_rules: dict) -> str:
+def compile_column_expression(col_name: str, transforms: List[dict], col_meta: dict, business_rules: dict) -> str:
     # Start with the raw column identifier
     expr = f"[{col_name}]"
     
     for st in transforms:
         action = st.get("action")
-        col_class = _classify_column(col_name, {"dtype": col_type})
+        col_class = _classify_column(col_name, col_meta)
         
         if action == "trim":
             if col_class not in ("metric", "date"):
@@ -700,6 +707,37 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
                         step_lines.append(f"")
                         step_lines.append(f"DELETE FROM {tbl_staging} WHERE {all_null_cond_delete};")
                         step_lines.append(f"")
+            elif action == "validate_referential_integrity_or_stage":
+                p = step_params(st)
+                rel_ds = p.get("related_dataset") or "?"
+                rel_col = p.get("related_column") or "?"
+                fk_action = p.get("fk_action") or "flag"
+                parent_tbl = _get_clean_table_name(rel_ds)
+                
+                if dialect == "tsql":
+                    step_lines.append(f"-- Referential integrity check: {col} -> {rel_ds}.{rel_col} (action={fk_action})")
+                    if fk_action == "reject_orphans":
+                        if not never_drop:
+                            step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                            step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
+                            step_lines.append(f"       (SELECT * FROM {tbl_staging} r2 WHERE r2.[{pk_col}] = r.[{pk_col}] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                            step_lines.append(f"       'Referential integrity violation: [{col}] value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' does not exist in {parent_tbl}.[{rel_col}]'")
+                            step_lines.append(f"FROM {tbl_staging} r")
+                            step_lines.append(f"WHERE r.{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = r.{c});")
+                            step_lines.append(f"")
+                            step_lines.append(f"DELETE FROM {tbl_staging}")
+                            step_lines.append(f"WHERE {c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = {c});")
+                            step_lines.append(f"")
+                        else:
+                            step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = {c});")
+                    elif fk_action == "null_fill_fk":
+                        step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = {c});")
+                    elif fk_action == "create_unknown_dim_record":
+                        step_lines.append(f"INSERT INTO {parent_tbl} ([{rel_col}])")
+                        step_lines.append(f"SELECT DISTINCT r.{c}")
+                        step_lines.append(f"FROM {tbl_staging} r")
+                        step_lines.append(f"WHERE r.{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = r.{c});")
+                        step_lines.append(f"")
 
         # Phase 2: Expression-Based Chained Transformations (Single-Pass Update)
         column_transforms = {}
@@ -718,10 +756,10 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
         for col_name, col_steps in column_transforms.items():
             has_cast_type = any(st.get("action") == "cast_type" for st in col_steps)
             base_steps = [st for st in col_steps if st.get("action") != "cast_type"]
-            col_type = cols_info.get(col_name, {}).get("dtype")
+            col_meta = cols_info.get(col_name) or {}
             
             if base_steps:
-                compiled_expr = compile_column_expression(col_name, base_steps, col_type, business_rules)
+                compiled_expr = compile_column_expression(col_name, base_steps, col_meta, business_rules)
                 update_clauses.append(f"[{col_name}] = {compiled_expr}")
             if has_cast_type:
                 col_clean = str(col_name).replace("'", "''")
@@ -772,8 +810,9 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
             for col in sorted(config_columns):
                 col_bracket = _brk(col)
                 col_clean_name = str(col)
-                col_type = cols_info.get(col, {}).get("dtype")
-                col_class = _classify_column(col, {"dtype": col_type})
+                col_meta = cols_info.get(col) or {}
+                col_type = col_meta.get("dtype")
+                col_class = _classify_column(col, col_meta)
                 
                 cast_type = get_sql_cast_type(col_type, col_clean_name)
                 cast_func = "TRY_CAST" if dialect == "tsql" else "CAST"

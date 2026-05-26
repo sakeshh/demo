@@ -1,18 +1,17 @@
 {
-    "dbo.courses_raw": {
-        "course_id": "object",
-        "course_name": "object",
-        "department": "object",
-        "credits": "object",
-        "instructor": "object",
-        "fee": "object"
+    "dbo.Customers_Raw": {
+        "CustomerID": "int64",
+        "CustomerName": "object",
+        "Email": "object",
+        "Phone": "object",
+        "City": "object",
+        "CreatedDate": "object"
     },
-    "dbo.students_raw": {
-        "student_id": "object",
-        "name": "object",
-        "email": "object",
-        "dob": "object",
-        "department": "object",
-        "phone": "object"
+    "dbo.Orders_Raw": {
+        "OrderID": "int64",
+        "CustomerID": "int64",
+        "OrderDate": "object",
+        "OrderAmount": "object",
+        "OrderStatus": "object"
     }
 }

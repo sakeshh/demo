@@ -103,6 +103,7 @@ T-SQL REQUIREMENTS:
 - Master Orchestration: Generate a master coordinator procedure named `dbo.etl_main` that calls all the individual table cleaning stored procedures.
 - Execution Logging & Log ID Bugfix: Output DDL to create a logging table named `dbo.etl_log` with columns `id INT IDENTITY(1,1) PRIMARY KEY`, `process_name VARCHAR(100) NOT NULL`, `start_time DATETIME NOT NULL`, `end_time DATETIME NULL`, `status VARCHAR(20) NOT NULL`, `error_message VARCHAR(MAX) NULL`. 
   Inside each stored procedure's TRY block, you MUST first run the `INSERT INTO dbo.etl_log (process_name, start_time, status) VALUES ('...', GETDATE(), 'RUNNING');` statement. IMMEDIATELY AFTER this insert, define and set the batch run ID: `DECLARE @run_id INT = SCOPE_IDENTITY();`. NEVER declare `@run_id = SCOPE_IDENTITY();` before any insert statement has occurred in the procedure, as this returns NULL and breaks audit batch tracking. Wrap the block in a transaction. Commit on success and rollback on failure.
+- Balanced Transactions: Every Try-Catch block MUST wrap data modifications in an explicit transaction block. Begin the transaction inside `BEGIN TRY` using `BEGIN TRANSACTION;` immediately after defining `@run_id`. Commit the transaction using `COMMIT TRANSACTION;` at the very end of the `BEGIN TRY` block (after all updates and logging are completed). At the beginning of the `BEGIN CATCH` block, you MUST verify if a transaction is still active and roll it back using: `IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;`. Never omit `BEGIN TRANSACTION` if `COMMIT/ROLLBACK` are used, or vice versa, to ensure compilation succeeds.
 - Incremental Loading, Watermarking & Watermark Storage: Stored procedures and the main procedure must accept parameters `@load_type VARCHAR(20) = 'FULL'` and `@last_run DATETIME = NULL`. Generate DDL for `dbo.etl_watermark (process_name VARCHAR(100) PRIMARY KEY, last_run_time DATETIME NOT NULL)`. 
   If `@load_type = 'INCREMENTAL'` and `@last_run IS NULL`, retrieve it using `SELECT @last_run = last_run_time FROM dbo.etl_watermark WHERE process_name = '...';`. Ensure this `@last_run` filter is fully applied to the copy queries (e.g. `WHERE watermark_col > @last_run`). Update the watermark using `MERGE` upon successful completion.
 - Performance Indexing: When creating the clean target table, add DDL commands to create NONCLUSTERED indexes on the primary keys, join/relationship keys, and watermark columns.
@@ -113,8 +114,20 @@ T-SQL REQUIREMENTS:
   2. Merge all default value fillings and invalid/sentinel replacements into a **single join-based `UPDATE` statement** joining `dbo.etl_default_values` and `dbo.etl_invalid_values` via `LEFT JOIN`s.
 - Zero Redundant Operations: Do not output duplicate or redundant CTE statements, updates, or procedure calls. Verify that any deduplication logic, outlier checks, or date/email validation is written once per column.
 - Type-Safe String Transformations: If applying `LTRIM`, `RTRIM`, `LOWER`, or `UPPER` on a non-string column (such as numeric/date columns), first cast the column explicitly to a string type (e.g. `CAST(col AS NVARCHAR(MAX))`) before calling the string function, then cast back to the target type. (e.g. `TRY_CAST(NULLIF(LTRIM(RTRIM(CAST(credits AS NVARCHAR(50)))), '') AS INT)`).
-- Rejects & Quarantine Logging: Enforce the use of `dbo.etl_rejects` table. For any row that fails validation format constraints (e.g. invalid date formats, invalid email patterns) or referential integrity (joins), insert the violating records into `dbo.etl_rejects` before deleting them from the staging table. Use `(SELECT * FROM staging_alias r2 WHERE r2.[pk] = r.[pk] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)` to serialize the violating row data. Perform validation deletes before applying transformations/casts to preserve the original invalid values.
-- Default Value Sanity: Seed defaults/invalid values dynamically. Use `NULL` as the default value strategy for date, email, and phone/identifier columns to prevent downstream data pollution. Replace literal default values with lookup queries using `TRY_CAST(default_value AS <type>)` from `dbo.etl_default_values` (dynamic casting based on column data type).
+- Rejects & Quarantine Logging: Enforce the use of `dbo.etl_rejects` table. Generate DDL to create the rejects logging table `dbo.etl_rejects` if it does not exist:
+  ```sql
+  CREATE TABLE dbo.etl_rejects (
+      id INT IDENTITY(1,1) PRIMARY KEY,
+      table_name VARCHAR(100) NOT NULL,
+      rejected_row_data NVARCHAR(MAX) NOT NULL,
+      reject_reason VARCHAR(255) NOT NULL,
+      etl_batch_id INT NOT NULL,
+      rejected_at DATETIME DEFAULT GETDATE()
+  );
+  ```
+  For any row that fails validation format constraints (e.g. invalid date formats, invalid email patterns) or referential integrity (joins), you MUST insert the violating records into `dbo.etl_rejects` and delete them from the staging table prior to any transformation/cast steps. Use `(SELECT * FROM staging_alias r2 WHERE r2.[pk] = r.[pk] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)` to serialize the violating row data. Perform validation deletes before applying transformations/casts to preserve the original invalid values.
+- Default Value Sanity & No Fake/Placeholder Defaults: Seed defaults/invalid values dynamically. Use `NULL` as the default value strategy for date, email, and phone/identifier columns to prevent downstream data pollution. NEVER hardcode placeholder default values (like `'10120631.5'` for dates, or `'99999'` for Phone/IDs) when filling nulls; un-defaulted values must remain `NULL`. Replace literal default values with lookup queries using `TRY_CAST(default_value AS <type>)` from `dbo.etl_default_values` (dynamic casting based on column data type).
+- Multi-Format Date Parsing: When parsing date columns, use a coalesced chain of `TRY_CONVERT` with different format styles (e.g. style 120, 103, 101, 111) to check if the date is valid. For example: `COALESCE(TRY_CONVERT(DATETIME, [date_col], 120), TRY_CONVERT(DATETIME, [date_col], 103), TRY_CONVERT(DATETIME, [date_col], 101), TRY_CONVERT(DATETIME, [date_col], 111))`. If all conversion attempts fail and the value is not empty/null, treat it as a format validation failure, insert it into `dbo.etl_rejects`, and delete it from the staging table.
 - Business-Key Deduplication: For row-level deduplication, partition by the candidate primary key and business keys (names containing `id`, `key`, `email`, `code`) instead of all non-key columns, and order the partition descending by watermark column (`ORDER BY <watermark> DESC`) to preserve the latest record. Perform deduplication inside the initial staging `INSERT INTO ... SELECT` statement using a CTE.
 - Index-Friendly Numeric Checks: For `zero_to_null` step, check numeric column placeholders without casting (e.g., `WHERE Quantity IN (-999, 999999)`). Avoid casting string columns to `NVARCHAR(MAX)` as well.
 - Active Curated Views: Generate active view layers `CREATE VIEW dbo.vw_<table_base>_Fact AS` (instead of commented templates) explicitly listing selected fields from Clean tables and prefixing duplicate fields as `[parent_prefix_col]` to prevent duplicate column view compilation errors.
@@ -134,6 +147,7 @@ ANSI SQL REQUIREMENTS:
 - Modular Stored Procedures: Wrap all cleaning steps for each table into dedicated stored procedures named `etl_clean_<table_name>`.
 - Master Orchestration: Generate a master coordinator procedure named `etl_main` that calls all the individual table cleaning stored procedures.
 - Execution Logging & Log ID Bugfix: Output DDL to create a logging table named `etl_log` and log the start, success, and failure status (with errors) within exception blocks. Always insert the log row first, and then capture the generated identity/auto-increment variable immediately to define the batch run ID safely without race conditions.
+- Balanced Transactions: Every block/procedure performing data modifications MUST wrap them in an explicit transaction. Start with `BEGIN TRANSACTION;` inside the try block immediately after capturing `@run_id`. End with `COMMIT TRANSACTION;` at the end of the success path. In exception handlers, verify and rollback using `ROLLBACK TRANSACTION;`.
 - Incremental Loading, Watermarking & Watermark Storage: Accept `@load_type` and `@last_run` parameters. If incremental, retrieve the watermark value from `etl_watermark` if not provided, and filter raw source rows using the watermark. Prior to inserting the incremental batch, delete matching clean rows by primary key to prevent duplicate records.
 - Performance Indexing: Add statements or comments recommending indexes on primary keys, join keys, and watermark columns.
 - Rule Merging & Single-Scan Consolidation: NEVER generate separate, sequential `UPDATE` statements for each plan step on the same table. Instead:
@@ -141,8 +155,9 @@ ANSI SQL REQUIREMENTS:
   2. Merge all default value fillings and invalid/sentinel replacements into a **single join-based `UPDATE` statement** joining `etl_default_values` and `etl_invalid_values` via `LEFT JOIN`s.
 - Zero Redundant Operations: Do not output duplicate or redundant CTE statements, updates, or procedure calls. Verify that any deduplication logic, outlier checks, or date/email validation is written once per column.
 - Type-Safe String Transformations: When trimming or lowercasing non-string columns, first cast the column explicitly to a string type (e.g. `CAST(col AS VARCHAR(50))`) before applying the string function.
-- Rejects & Quarantine Logging: Validate date and email constraints and quarantine violating records to an `etl_rejects` table before removing them from the staging table. Perform validation deletes before applying transformations/casts to preserve the original invalid values.
-- Default Value Sanity: Use `NULL` as the default value strategy for date, email, and phone/identifier columns to prevent downstream data pollution. Use `etl_default_values` lookup table queries (with type-safe dynamic casting based on column data type) and `etl_invalid_values` lookup table queries instead of hardcoded default/sentinel values.
+- Rejects & Quarantine Logging: Validate date and email constraints and quarantine violating records to an `etl_rejects` table before removing them from the staging table. Perform validation deletes before applying transformations/casts to preserve the original invalid values. Create the table DDL if not exists: `CREATE TABLE etl_rejects (id INT, table_name VARCHAR(100), rejected_row_data VARCHAR(MAX), reject_reason VARCHAR(255), etl_batch_id INT, rejected_at TIMESTAMP)`.
+- Default Value Sanity & No Fake/Placeholder Defaults: Use `NULL` as the default value strategy for date, email, and phone/identifier columns to prevent downstream data pollution. NEVER hardcode placeholder default values (like `'10120631.5'` for dates, or `'99999'` for Phone/IDs) when filling nulls; un-defaulted values must remain `NULL`. Use `etl_default_values` lookup table queries (with type-safe dynamic casting based on column data type) and `etl_invalid_values` lookup table queries instead of hardcoded default/sentinel values.
+- Multi-Format Date Parsing: Cascaded parsing using conditional conversion attempts (e.g., trying style 120, 103, 101, 111). If all fail, quarantine the row as invalid format into `etl_rejects`.
 - Business-Key Deduplication: Partition row-level deduplication by business keys/primary keys, sorting descending by the watermark column to preserve the latest record. Perform deduplication inside the initial staging `INSERT` statement using a CTE rather than doing standalone `DELETE` statements.
 - Index-Friendly Numeric Checks: Avoid casting columns for sentinel/placeholder checks where possible (especially for numeric columns).
 - Active Curated Views: Generate active view layers `CREATE VIEW vw_<table_base>_Fact AS` explicitly listing selected fields and renaming duplicate joined fields to prevent duplicate column errors.
@@ -252,6 +267,13 @@ def _classify_column(col_name: str, col_meta: dict) -> str:
     """
     Classify column as 'date', 'id', 'metric', 'categorical', or 'string'.
     """
+    # 0. Check approved semantic_type first if available
+    approved_tag = (col_meta.get("semantic_type") or "").lower().strip()
+    if approved_tag in ("id", "metric", "categorical", "date", "text"):
+        if approved_tag == "text":
+            return "string"
+        return approved_tag
+
     c_lower = str(col_name).lower()
     
     # 1. Date checks
@@ -291,6 +313,12 @@ def _classify_column(col_name: str, col_meta: dict) -> str:
 
 
 def _is_numeric_column(col_name: str, col_meta: dict) -> bool:
+    approved_tag = (col_meta.get("semantic_type") or "").lower().strip()
+    if approved_tag == "metric":
+        return True
+    if approved_tag in ("id", "date", "categorical", "text"):
+        return False
+
     c_lower = str(col_name).lower()
     # Identifiers, phones, emails, and dates are semantically NOT numeric measures
     if any(x in c_lower for x in ("phone", "email", "name", "date", "time", "dob", "student_id", "course_id", "instructor", "department")):
@@ -436,6 +464,7 @@ def _build_codegen_payload(
                 col: {
                     "dtype": cmeta.get("dtype") or cmeta.get("inferred_type"),
                     "null_percentage": cmeta.get("null_percentage"),
+                    "semantic_type": cmeta.get("semantic_type", "unknown"),
                 }
                 for col, cmeta in cols.items()
                 if isinstance(cmeta, dict)

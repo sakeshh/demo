@@ -128,11 +128,19 @@ def _is_text_dtype(dtype) -> bool:
     return "object" in ds or "string" in ds or "str" in ds or "category" in ds
 
 
-def _is_actual_numeric_column(col_name: str) -> bool:
+def _is_actual_numeric_column(col_name: str, approved_semantic_tag: Optional[str] = None) -> bool:
     """
     Check if a column is semantically numeric, filtering out identifiers,
     phones, emails, zipcodes, dates, etc.
+    If approved_semantic_tag is provided, it overrides the default heuristics.
     """
+    if approved_semantic_tag is not None:
+        tag_lower = approved_semantic_tag.lower()
+        if tag_lower == "metric":
+            return True
+        if tag_lower in ("id", "categorical", "date", "text"):
+            return False
+
     c_lower = str(col_name).lower()
     if any(x in c_lower for x in ("phone", "email", "ssn", "zip", "postal", "date", "time", "dob", "stamp")) or c_lower.endswith("_at"):
         return False
@@ -774,6 +782,8 @@ def profile_dataframe(df: pd.DataFrame, job_id: Optional[str] = None) -> Dict[st
             hint = "numeric_like"
         type_dist = scalar_type_distribution(s) if _is_text_dtype(dtype_str) else None
 
+        raw_smp = s.dropna().head(20).astype(str).tolist()
+
         col_profile = {
             "dtype": dtype_str,
             "dtype_inference": hint,
@@ -782,6 +792,7 @@ def profile_dataframe(df: pd.DataFrame, job_id: Optional[str] = None) -> Dict[st
             "unique_count": safe_nunique(s),
             "semantic_type": semantic,
             "candidate_primary_key": safe_is_unique(s),
+            "raw_samples": raw_smp,
         }
         n_nonnull = int(s.notna().sum())
         if n_nonnull > 0:
@@ -844,7 +855,8 @@ def load_sql_datasets(
     connection_cfg: Dict[str, Any],
     dataset_key_prefix: str = "",
     max_rows: Optional[int] = None,
-    db_connectors_by_dataset: Optional[Dict[str, Tuple[Any, str]]] = None
+    db_connectors_by_dataset: Optional[Dict[str, Tuple[Any, str]]] = None,
+    only_tables: Optional[List[str]] = None
 ) -> Dict[str, pd.DataFrame]:
     """
     Loads all discovered tables from Azure SQL using the provided connector configuration.
@@ -862,6 +874,15 @@ def load_sql_datasets(
     try:
         connector = AzureSQLPythonNetConnector(connection_cfg)
         tables = connector.discover_tables()
+
+        if only_tables is not None:
+            allowed_set = {t.lower() for t in only_tables}
+            filtered_tables = []
+            for t in tables:
+                key = f"{p}{t}" if p else t
+                if key.lower() in allowed_set:
+                    filtered_tables.append(t)
+            tables = filtered_tables
 
         for table in tables:
             key = f"{p}{table}" if p else table
@@ -1034,7 +1055,11 @@ def _xml_to_df_exploded(path: str) -> pd.DataFrame:
 # FILE LOADER (CSV, TSV, JSON, JSONL, XML, PARQUET, XLSX)
 # ============================================================
 
-def load_file_datasets(path: str, max_rows: Optional[int] = None) -> Dict[str, pd.DataFrame]:
+def load_file_datasets(
+    path: str,
+    max_rows: Optional[int] = None,
+    only_files: Optional[List[str]] = None
+) -> Dict[str, pd.DataFrame]:
     """
     Reads supported files from a local folder and returns a dict: { "<file_name>": DataFrame }
     """
@@ -1044,7 +1069,12 @@ def load_file_datasets(path: str, max_rows: Optional[int] = None) -> Dict[str, p
         print("[INFO] Filesystem path not found:", path)
         return data
 
-    for file in os.listdir(path):
+    files_to_load = os.listdir(path)
+    if only_files is not None:
+        allowed_set = {f.lower() for f in only_files}
+        files_to_load = [f for f in files_to_load if f.lower() in allowed_set]
+
+    for file in files_to_load:
         fp = os.path.join(path, file)
         if not os.path.isfile(fp):
             continue
@@ -2425,10 +2455,8 @@ def run_extended_dq_checks(
         s = df[col]
         col_lower = str(col).lower()
         meta = cols_meta.get(col, {})
-        semantic = detect_semantic_type(df[col], col_name=col)
         meta_semantic = (meta.get("semantic_type") or "unknown").lower()
-        if semantic == "unknown":
-            semantic = meta_semantic
+        semantic = meta_semantic if meta_semantic != "unknown" else detect_semantic_type(df[col], col_name=col)
         null_pct = float(meta.get("null_percentage") or 0)
         uq = int(meta.get("unique_count") or 0)
         non_null = int(s.notna().sum())
@@ -2493,7 +2521,7 @@ def run_extended_dq_checks(
         s_str = s_eff.astype(str).str.strip() if _is_text_dtype(s_eff.dtype) else s_eff
         num = pd.to_numeric(s_str, errors="coerce")
         parse_ok = int(num.notna().sum())
-        if parse_ok >= max(10, int(0.85 * non_null)) and _is_actual_numeric_column(col):
+        if parse_ok >= max(10, int(0.85 * non_null)) and _is_actual_numeric_column(col, meta_semantic):
             v = num.dropna()
             if len(v) > max_heavy:
                 v = v.sample(max_heavy, random_state=42)
@@ -2679,7 +2707,7 @@ def run_extended_dq_checks(
             semantic = (meta.get("semantic_type") or "unknown").lower()
 
             # Z-Score outliers (> 4 std deviations)
-            if parse_ok >= max(10, int(0.85 * non_null)) and _is_actual_numeric_column(col):
+            if parse_ok >= max(10, int(0.85 * non_null)) and _is_actual_numeric_column(col, semantic):
                 v = num.dropna()
                 if len(v) >= 10:
                     try:
@@ -2701,7 +2729,7 @@ def run_extended_dq_checks(
                         pass
 
             # Round number anomaly: >30% of values are multiples of 1000 (or 100 for smaller values)
-            if parse_ok >= max(10, int(0.85 * non_null)) and _is_actual_numeric_column(col):
+            if parse_ok >= max(10, int(0.85 * non_null)) and _is_actual_numeric_column(col, semantic):
                 v = num.dropna()
                 if len(v) >= 20:
                     try:
@@ -3793,6 +3821,73 @@ def run_custom_rules(
     return extra
 
 
+def detect_date_format_variants(series: pd.Series) -> list[dict]:
+    """
+    For object/string columns suspected as dates, count format variants.
+    Returns list of {"format": str, "count": int, "pct": float}
+    """
+    import re
+    patterns = {
+        "DD/MM/YYYY": r"^\d{2}/\d{2}/\d{4}$",
+        "YYYY-MM-DD": r"^\d{4}-\d{2}-\d{2}$",
+        "MM-DD-YYYY": r"^\d{2}-\d{2}-\d{4}$",
+        "YYYY/MM/DD": r"^\d{4}/\d{2}/\d{2}$",
+        "Mon D YYYY": r"^[A-Za-z]+ \d{1,2} \d{4}$",
+        "DD-Mon-YYYY": r"^\d{2}-[A-Za-z]+-\d{4}$",
+    }
+    sample = series.dropna().astype(str).str.strip().head(5000)
+    total = len(sample)
+    results = []
+    if total == 0:
+        return []
+    for fmt_name, pattern in patterns.items():
+        count = sample.str.match(pattern).sum()
+        if count > 0:
+            results.append({"format": fmt_name, "count": int(count), "pct": round(float(count / total), 4)})
+    return sorted(results, key=lambda x: -x["count"])
+
+
+def confirm_business_key_duplicates(df: pd.DataFrame, pk_cols: list[str]) -> dict:
+    """
+    Given LLM-suggested PK columns, confirm actual duplicate count.
+    """
+    available = [c for c in pk_cols if c in df.columns]
+    if not available:
+        return {"confirmed": False, "reason": "pk_cols not found in dataframe"}
+    dup_count = int(df.duplicated(subset=available).sum())
+    return {
+        "confirmed": True,
+        "business_key_cols": available,
+        "business_key_duplicate_count": dup_count,
+        "dedup_strategy_hint": "keep_last" if dup_count > 0 else "no_action_needed"
+    }
+
+
+def detect_null_pattern(df: pd.DataFrame, col_name: str) -> dict:
+    """
+    Check if nulls in col_name correlate with a specific categorical column (MNAR detection).
+    Caps at top-5 categorical columns to keep performance O(n).
+    """
+    null_mask = df[col_name].isnull()
+    total_nulls = null_mask.sum()
+    if total_nulls == 0:
+        return {"type": "none"}
+    cat_cols = [c for c in df.columns if c != col_name and df[c].dtype == object][:5]
+    for cat_col in cat_cols:
+        try:
+            null_by_cat = df.groupby(cat_col)[col_name].apply(lambda x: x.isnull().mean())
+            if not null_by_cat.empty and null_by_cat.max() > 0.8: # 80%+ nulls concentrated in one category
+                return {
+                    "type": "MNAR",
+                    "concentrated_in_col": cat_col,
+                    "concentrated_in_value": str(null_by_cat.idxmax()),
+                    "fill_strategy_hint": "flag_only"
+                }
+        except Exception:
+            pass
+    return {"type": "MCAR", "fill_strategy_hint": "median_or_mode"}
+
+
 # ============================================================
 # MAIN ENTRYPOINT
 # ============================================================
@@ -3809,6 +3904,7 @@ def load_and_profile(
     max_rows: Optional[int] = None,
     business_rules: Optional[Dict[str, Any]] = None,
     db_connectors: Optional[Dict[str, Any]] = None,
+    approved_semantics: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """
     Orchestrator:
@@ -3909,6 +4005,14 @@ def load_and_profile(
         meta["source_root"] = source_root_by_dataset.get(name, "")
         metadata[name] = meta
 
+    if approved_semantics:
+        for name, table_sem in approved_semantics.items():
+            if name in metadata:
+                meta = metadata[name]
+                for col, tag in table_sem.items():
+                    if col in meta.get("columns", {}):
+                        meta["columns"][col]["semantic_type"] = tag
+
     if len(datasets) >= 2:
         try:
             from agent.specialists.cross_dataset_agent import generate_sweetviz_comparison
@@ -4002,6 +4106,45 @@ def load_and_profile(
         },
         "executive_summary_items": build_executive_summary_items(per_dataset_dq, global_issues, thresholds),
     }
+
+    # 1. Run LLM Schema Enrichment first
+    try:
+        from agent.llm_schema_enricher import enrich_assessment_with_schema_llm
+        out = enrich_assessment_with_schema_llm(out)
+    except Exception as e:
+        logger.error(f"Enrichment error: {e}")
+
+    # 2. Run the Pandas Confirmation Pass using the loaded dataframes
+    for name, df in datasets.items():
+        if name not in out["datasets"]:
+            continue
+        ds_meta = out["datasets"][name]
+        
+        # A. Business Key duplicate confirmation
+        llm_ds_hints = ds_meta.setdefault("llm_hints", {})
+        probable_pks = llm_ds_hints.get("probable_pk_columns") or []
+        if probable_pks:
+            dup_info = confirm_business_key_duplicates(df, probable_pks)
+            llm_ds_hints["business_key_confirmation"] = dup_info
+            
+        # B. Date variant and Null patterns per column
+        for col_name, col_meta in ds_meta.get("columns", {}).items():
+            if col_name not in df.columns:
+                continue
+            hints = col_meta.setdefault("llm_hints", {})
+            
+            # Date check
+            if hints.get("mixed_formats_suspected") or hints.get("semantic_type") == "date":
+                fmt_vars = detect_date_format_variants(df[col_name])
+                hints["format_variants"] = fmt_vars
+                if len(fmt_vars) > 1:
+                    hints["mixed_formats_suspected"] = True
+                    
+            # Null pattern check
+            if col_meta.get("null_percentage", 0) > 0:
+                null_pat = detect_null_pattern(df, col_name)
+                hints["null_pattern"] = null_pat
+
     if return_datasets:
         out["_datasets"] = datasets
 

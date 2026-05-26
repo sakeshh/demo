@@ -41,7 +41,7 @@ class BaseExtractionMCP:
 
     kind: str = "base"
 
-    def extract(self, *, source_root: Dict[str, Any], location: Dict[str, Any], job_id: Optional[str] = None) -> Dict[str, Any]:
+    def extract(self, *, source_root: Dict[str, Any], location: Dict[str, Any], job_id: Optional[str] = None, approved_semantics: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
         raise NotImplementedError
 
 
@@ -53,8 +53,8 @@ class AzureSQLMCP(BaseExtractionMCP):
 
         self._run_assessment = run_assessment
 
-    def extract(self, *, source_root: Dict[str, Any], location: Dict[str, Any], job_id: Optional[str] = None) -> Dict[str, Any]:
-        return self._run_assessment(_single_location_config(source_root, location), job_id=job_id)
+    def extract(self, *, source_root: Dict[str, Any], location: Dict[str, Any], job_id: Optional[str] = None, approved_semantics: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
+        return self._run_assessment(_single_location_config(source_root, location), job_id=job_id, approved_semantics=approved_semantics)
 
 
 class BlobMCP(BaseExtractionMCP):
@@ -65,8 +65,8 @@ class BlobMCP(BaseExtractionMCP):
 
         self._run_assessment = run_assessment
 
-    def extract(self, *, source_root: Dict[str, Any], location: Dict[str, Any], job_id: Optional[str] = None) -> Dict[str, Any]:
-        return self._run_assessment(_single_location_config(source_root, location), job_id=job_id)
+    def extract(self, *, source_root: Dict[str, Any], location: Dict[str, Any], job_id: Optional[str] = None, approved_semantics: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
+        return self._run_assessment(_single_location_config(source_root, location), job_id=job_id, approved_semantics=approved_semantics)
 
 
 class LocalFSMCP(BaseExtractionMCP):
@@ -77,8 +77,8 @@ class LocalFSMCP(BaseExtractionMCP):
 
         self._run_assessment = run_assessment
 
-    def extract(self, *, source_root: Dict[str, Any], location: Dict[str, Any], job_id: Optional[str] = None) -> Dict[str, Any]:
-        return self._run_assessment(_single_location_config(source_root, location), job_id=job_id)
+    def extract(self, *, source_root: Dict[str, Any], location: Dict[str, Any], job_id: Optional[str] = None, approved_semantics: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
+        return self._run_assessment(_single_location_config(source_root, location), job_id=job_id, approved_semantics=approved_semantics)
 
 
 class StreamMCP(BaseExtractionMCP):

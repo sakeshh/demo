@@ -61,6 +61,7 @@ except Exception:
 
 class ConfigText(BaseModel):
     config: str
+    approved_semantics: Optional[Dict[str, Dict[str, str]]] = None
 
 
 class StreamPayload(BaseModel):
@@ -87,6 +88,12 @@ class AssessPayload(BaseModel):
     requirements: Optional[Dict[str, Any]] = None
     sources_path: Optional[str] = None
     do_transform: Optional[bool] = None
+    approved_semantics: Optional[Dict[str, Dict[str, str]]] = None
+
+
+class SemanticInferencePayload(BaseModel):
+    sources_path: Optional[str] = None
+    sources: Optional[List[str]] = None
 
 
 class ChatPayload(BaseModel):
@@ -213,7 +220,7 @@ def _get_config_text(body_config: str) -> str:
 def api_run(cfg: ConfigText, additional_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run a full assessment. Config from body, or from file at MCP_DEFAULT_CONFIG_PATH if body empty."""
     config_text = _get_config_text(cfg.config)
-    return run_assessment(config_text)
+    return run_assessment(config_text, additional_data=additional_data, approved_semantics=cfg.approved_semantics)
 
 
 @app.post("/list_tables")
@@ -386,6 +393,7 @@ def api_assess(payload: AssessPayload, request: Request) -> Dict[str, Any]:
         sources_path=sources_path,
         selected_sources=selected_sources,
         request_id=getattr(getattr(request, "state", None), "request_id", "") or "",
+        approved_semantics=payload.approved_semantics,
     )
     return {"ok": True, "result": result}
 
@@ -445,6 +453,120 @@ def api_update_session_context(payload: SessionContextPayload) -> Dict[str, Any]
         ctx[str(k)] = v
     save_session(sess)
     return {"ok": True, "session_id": sid, "context_keys": list(ctx.keys())}
+
+
+@app.post("/etl/infer-semantics")
+def api_infer_semantics(payload: SemanticInferencePayload) -> Dict[str, Any]:
+    """
+    Load sample data for the selected sources/tables and infer column semantics.
+    Returns: {"ok": True, "semantics": { table_name: { col_name: tag } }}
+    """
+    from agent.specialists.semantic_infer_agent import SemanticInferAgent
+    from agent.intelligent_data_assessment import load_sql_datasets, load_file_datasets, _sql_location_key_prefix
+    from agent.mcp_interface import _parse_config_text
+    import pandas as pd
+
+    sources_path = (
+        (payload.sources_path or "").strip()
+        or os.environ.get("MCP_SOURCES_PATH")
+        or "config/sources.yaml"
+    )
+    if not os.path.isfile(sources_path):
+        raise HTTPException(status_code=404, detail=f"Sources config file not found: {sources_path}")
+
+    try:
+        with open(sources_path, "r", encoding="utf-8") as f:
+            config_text = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read sources config: {e}")
+
+    try:
+        cfg = _parse_config_text(config_text)
+        source_cfg = cfg.get("source", cfg) if isinstance(cfg, dict) else {}
+        locations = list(source_cfg.get("locations", []) or [])
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse sources configuration: {e}")
+
+    # Determine which locations to process
+    locs = []
+    if payload.sources:
+        selected_set = {s.lower() for s in payload.sources}
+        for loc in locations:
+            lid = loc.get("id") or loc.get("label") or loc.get("name") or ""
+            if lid.lower() in selected_set:
+                locs.append(loc)
+        # If no direct location matched, let's keep all database locations and filter tables later
+        if not locs:
+            locs = [l for l in locations if (l.get("type") or "").lower() == "database"]
+    else:
+        locs = locations
+
+    datasets: Dict[str, pd.DataFrame] = {}
+    db_seen = 0
+    db_locs = [l for l in locs if (l.get("type") or "").lower() == "database"]
+    multi_db = len(db_locs) > 1
+
+    for loc in locs:
+        typ = (loc.get("type") or "").lower()
+        if typ == "database":
+            conn = loc.get("connection", {}) or {}
+            prefix = _sql_location_key_prefix(loc, conn, db_seen, multi_db)
+            try:
+                for table_key, df in load_sql_datasets(
+                    conn, dataset_key_prefix=prefix, max_rows=5, only_tables=payload.sources
+                ).items():
+                    datasets[table_key] = df
+            except Exception as e:
+                # Log and skip single DB errors to avoid failing the whole endpoint
+                logging.getLogger(__name__).warning(f"Failed to load sample from DB: {e}")
+            db_seen += 1
+        elif typ == "filesystem":
+            fp = loc.get("path")
+            if fp:
+                root = os.path.abspath(os.path.normpath(fp))
+                try:
+                    for fname, df in load_file_datasets(root, max_rows=5, only_files=payload.sources).items():
+                        key = fname
+                        if key in datasets:
+                            key = f"{os.path.basename(root.rstrip(os.sep))}__{fname}"
+                        datasets[key] = df
+                except Exception as e:
+                    logging.getLogger(__name__).warning(f"Failed to load sample from filesystem: {e}")
+
+    # If payload.sources is specified, filter datasets keys that match payload.sources
+    if payload.sources:
+        selected_set = {s.lower() for s in payload.sources}
+        datasets = {k: v for k, v in datasets.items() if k.lower() in selected_set}
+
+    if not datasets:
+        return {"ok": True, "semantics": {}, "message": "No matching datasets found to infer semantics."}
+
+    # Run semantic inference in parallel using a ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor
+    agent = SemanticInferAgent()
+    result_semantics = {}
+    samples = {}
+
+    def process_dataset(table_name, df):
+        try:
+            sem = agent.infer_semantics(table_name=table_name, df=df)
+            smp = {
+                col: [str(x) for x in df[col].dropna().head(3).tolist()]
+                for col in df.columns
+            }
+            return table_name, sem, smp
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Inference failed for {table_name}: {e}")
+            return table_name, {}, {}
+
+    with ThreadPoolExecutor(max_workers=min(len(datasets), 8)) as executor:
+        results = list(executor.map(lambda item: process_dataset(item[0], item[1]), datasets.items()))
+
+    for table_name, sem, smp in results:
+        result_semantics[table_name] = sem
+        samples[table_name] = smp
+
+    return {"ok": True, "semantics": result_semantics, "samples": samples}
 
 
 @app.post("/etl/plan")

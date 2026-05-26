@@ -55,7 +55,7 @@ class ExtractionAgent:
         # MCP adapters are created per location type (database/blob/filesystem/stream).
         pass
 
-    def extract_one(self, source_root: Dict[str, Any], loc: Dict[str, Any], idx: int, job_id: Optional[str] = None) -> ExtractionResult:
+    def extract_one(self, source_root: Dict[str, Any], loc: Dict[str, Any], idx: int, job_id: Optional[str] = None, approved_semantics: Optional[Dict[str, Dict[str, str]]] = None) -> ExtractionResult:
         """
         Synchronous single-source extraction.
         """
@@ -63,7 +63,7 @@ class ExtractionAgent:
         mcp = mcp_for_location_type(location_type)
         if isinstance(mcp, StreamMCP):
             raise ValueError("Stream sources require records input; use extract_stream_records().")
-        res = mcp.extract(source_root=source_root, location=loc, job_id=job_id)
+        res = mcp.extract(source_root=source_root, location=loc, job_id=job_id, approved_semantics=approved_semantics)
         return ExtractionResult(
             source_name=_location_display_name(loc, idx),
             location_type=location_type,
@@ -87,6 +87,7 @@ class ExtractionAgent:
         stream_records: Optional[List[Dict[str, Any]]] = None,
         stream_name: str = "stream",
         job_id: Optional[str] = None,
+        approved_semantics: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> Tuple[List[ExtractionResult], List[Dict[str, Any]]]:
         """
         Extract multiple locations.
@@ -116,7 +117,7 @@ class ExtractionAgent:
                 attempt += 1
                 try:
                     # Run sync extraction in a worker thread with a per-source timeout.
-                    coro = asyncio.to_thread(self.extract_one, source_root, loc, idx, job_id)
+                    coro = asyncio.to_thread(self.extract_one, source_root, loc, idx, job_id, approved_semantics)
                     r = await asyncio.wait_for(coro, timeout=per_source_timeout_s)
                     results.append(r)
                     return
