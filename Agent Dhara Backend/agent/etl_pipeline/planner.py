@@ -341,12 +341,27 @@ def _steps_from_business_notes(
     Returns (dataset, column, action, note) tuples.
     """
     notes = (rules.get("notes") or "").lower()
-    if "phone" not in notes:
+    
+    # Identify which privacy categories are mentioned in notes
+    targets_keywords = []
+    if "phone" in notes:
+        targets_keywords.append("phone")
+    if "email" in notes:
+        targets_keywords.append("email")
+    if "ssn" in notes:
+        targets_keywords.append("ssn")
+    if "credit card" in notes or "creditcard" in notes or "cc " in notes or " cc" in notes:
+        targets_keywords.append("credit card")
+
+    if not targets_keywords:
         return []
     if not any(w in notes for w in ("hash", "mask", "privacy")):
         return []
+        
     use_hash = "hash" in notes
     use_mask = "mask" in notes and not use_hash
+    # We map general privacy steps to the standard hash_phone / mask_phone actions 
+    # since these operations work on any string values in all codegen engines.
     action = "hash_phone" if use_hash else ("mask_phone" if use_mask else "hash_phone")
 
     ds_names = list((assessment.get("datasets") or {}).keys())
@@ -365,13 +380,24 @@ def _steps_from_business_notes(
     out: List[Tuple[str, str, str, str]] = []
     for ds in targets:
         for col in _dataset_columns(assessment, ds).keys():
-            if str(col).lower() == "phone":
+            col_lower = str(col).lower()
+            matched_kw = None
+            if "phone" in targets_keywords and "phone" in col_lower:
+                matched_kw = "phone"
+            elif "email" in targets_keywords and "email" in col_lower:
+                matched_kw = "email"
+            elif "ssn" in targets_keywords and "ssn" in col_lower:
+                matched_kw = "ssn"
+            elif "credit card" in targets_keywords and ("credit" in col_lower and ("card" in col_lower or "cc" in col_lower)):
+                matched_kw = "credit card"
+                
+            if matched_kw:
                 out.append(
                     (
                         ds,
                         col,
                         action,
-                        f"business_rules.notes: {'hash' if use_hash else 'mask'} phone for privacy",
+                        f"business_rules.notes: {'hash' if use_hash else 'mask'} {matched_kw} for privacy",
                     )
                 )
     return out
@@ -396,6 +422,7 @@ def build_etl_plan(
     *,
     engine: str = "python",
     source_context: Optional[Dict[str, Any]] = None,
+    generation_mode: Optional[str] = "full",
 ) -> Dict[str, Any]:
     """
     Build versioned ETL plan JSON from assessment + normalized business rules.
@@ -405,6 +432,44 @@ def build_etl_plan(
 
     rules = normalize_business_rules(business_rules_raw)
     exclude = set(rules.get("exclude_columns") or [])
+
+    # Build explicit semantic schema layer
+    sem_schema = {}
+    from agent.etl_pipeline.semantic_classifier import classify_column_semantic, SemanticDescriptor
+    from agent.etl_pipeline.semantic_llm_enricher import enrich_low_confidence_columns
+
+    low_conf_cols = {}
+    for ds_name, ds_meta in (assessment.get("datasets") or {}).items():
+        if isinstance(ds_meta, dict):
+            cols = ds_meta.get("columns") or {}
+            for col_name, col in cols.items():
+                if isinstance(col, dict):
+                    descriptor = classify_column_semantic(col_name, col)
+                    key = f"{ds_name}.{col_name}"
+                    sem_schema[key] = descriptor
+                    if descriptor["confidence"] < 0.75:
+                        low_conf_cols[key] = {
+                            "col_name": col_name,
+                            "col_meta": col,
+                            "descriptor": descriptor
+                        }
+
+    # Layer 2: LLM enrichment for low-confidence columns
+    if low_conf_cols:
+        enriched = enrich_low_confidence_columns(low_conf_cols)
+        for key, enriched_desc in enriched.items():
+            sem_schema[key] = SemanticDescriptor(enriched_desc)
+
+    # Layer 3: User overrides from rules.get("semantic_overrides")
+    overrides = rules.get("semantic_overrides") or {}
+    for override_key, override_val in overrides.items():
+        if not isinstance(override_val, dict):
+            continue
+        for key in list(sem_schema.keys()):
+            if key == override_key or key.endswith(f".{override_key}"):
+                sem_schema[key].update(override_val)
+                sem_schema[key]["inferred_by"] = "user_override"
+                sem_schema[key]["confidence"] = 1.0
 
     sug_pkg = suggest_transformations(assessment)
     suggestions: List[Dict[str, Any]] = list(sug_pkg.get("suggested_transformations") or [])
@@ -499,6 +564,15 @@ def build_etl_plan(
         pri = _ACTION_PRIORITY.get(action2, 80)
         row_est = s.get("row_count_affected")
         col_stats = _col_stats_for_step(assessment, ds or "", col)
+        if ds and col:
+            col_key = f"{ds}.{col}"
+            desc = sem_schema.get(col_key)
+            if desc:
+                col_stats = dict(col_stats)
+                col_stats["semantic_type"] = desc.get("semantic_type")
+                col_stats["sub_type"] = desc.get("sub_type")
+                col_stats["pii_level"] = desc.get("pii_level")
+                col_stats["fill_strategy"] = desc.get("fill_strategy")
         evidence = _build_evidence(s, col_stats, action2, rules)
         params = build_step_params(
             action2,
@@ -531,6 +605,15 @@ def build_etl_plan(
         key = (ds, col, act)
         if key not in step_map:
             cstats = _col_stats_for_step(assessment, ds, col)
+            if ds and col:
+                col_key = f"{ds}.{col}"
+                desc = sem_schema.get(col_key)
+                if desc:
+                    cstats = dict(cstats)
+                    cstats["semantic_type"] = desc.get("semantic_type")
+                    cstats["sub_type"] = desc.get("sub_type")
+                    cstats["pii_level"] = desc.get("pii_level")
+                    cstats["fill_strategy"] = desc.get("fill_strategy")
             ev = {"why_this_action": note, "confidence": 0.9}
             step_map[key] = {
                 "dataset": ds,
@@ -613,12 +696,14 @@ def build_etl_plan(
                     null_pct = float(cstats["null_percentage"]) * 100.0
                 except (TypeError, ValueError):
                     pass
-            st["bucket"] = classify_step_bucket(
+            res = classify_step_bucket(
                 str(st.get("action") or ""),
                 severity=str(st.get("severity") or "medium"),
                 null_percentage=null_pct,
                 never_drop_rows=bool(rules.get("never_drop_rows")),
             )
+            st["bucket"] = res["bucket"]
+            st["phase"] = res["phase"]
             enriched_steps.append(st)
         datasets_out[ds_name] = finalize_dataset_steps(enriched_steps, assessment, rules)
 
@@ -634,21 +719,29 @@ def build_etl_plan(
                 + f" Multi-dataset ({ds_count} sources, {rel_plan['join_count']} join(s) detected)."
             )
 
-    # Build explicit semantic schema layer
-    sem_schema = {}
-    for ds_name, ds_meta in (assessment.get("datasets") or {}).items():
-        if isinstance(ds_meta, dict):
-            cols = ds_meta.get("columns") or {}
-            for col_name, col in cols.items():
-                if isinstance(col, dict):
-                    hints = col.get("llm_hints") or {}
-                    sem_type = hints.get("semantic_type") or col.get("semantic_type") or "unknown"
-                    sem_schema[f"{ds_name}.{col_name}"] = str(sem_type).lower().strip()
+    # Semantic schema is already built at the top of the function and contains rich descriptors
+
+    # S2-MOD-03: Update planner.py to support generation_mode and DQ gate checks
+    if (generation_mode or "full").lower() == "full":
+        from agent.etl_pipeline.dq_gate import check_dq_gate
+        threshold = float(rules.get("dq_threshold", 70.0))
+        for ds_name in datasets_known:
+            gate_res = check_dq_gate(assessment, ds_name, threshold=threshold, force_unlock=ds_name in rules.get("force_unlock", []), sem_schema=sem_schema)
+            if not gate_res["passed"]:
+                manual_review.append({
+                    "dataset": ds_name,
+                    "column": None,
+                    "issue_type": "dq_gate_warning",
+                    "severity": "high",
+                    "message": f"Data quality score ({gate_res['score']}) is below threshold ({threshold}). Phase 2 transformations are blocked for dataset '{ds_name}'. Please resolve errors in Phase 1 (cleanse) first.",
+                    "guidance": "Resolve data quality issues or lower/override the threshold in business rules.",
+                })
 
     plan = {
         "plan_version": 1,
         "plan_id": _plan_id(),
         "engine": (engine or "python").lower(),
+        "generation_mode": generation_mode or "full",
         "created_at": time.time(),
         "assessment_signature": _assessment_signature(assessment),
         "business_rules": rules,

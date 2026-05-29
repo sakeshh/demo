@@ -1,0 +1,14 @@
+[
+  {
+    "id": 1,
+    "active": "true"
+  },
+  {
+    "id": 2,
+    "active": "yes"
+  },
+  {
+    "id": 3,
+    "active": "1"
+  }
+]

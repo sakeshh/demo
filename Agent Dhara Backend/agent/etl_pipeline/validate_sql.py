@@ -4,9 +4,9 @@ import re
 from typing import List, Tuple
 
 _DANGEROUS = [
-    (r"\bdrop\s+table\s+(?!.*\b\w*(?:_clean|_stg|temp_|_temp)\b|.*#)", "contains DROP TABLE on non-staging/clean table — remove for safety"),
-    (r"\btruncate\s+table\s+(?!.*\b\w*(?:_clean|_stg|temp_|_temp)\b|.*#)", "contains TRUNCATE TABLE on non-staging/clean table — remove for safety"),
-    (r"\bdelete\s+from\s+(?!.*\b\w*(?:_clean|_stg|_dedup|temp_|etl_log|cte|_temp)\b|.*#)", "contains DELETE FROM on non-staging/clean table — remove for safety"),
+    (r"\bdrop\s+table\s+(?!.*\b\w*(?:_clean|_transformed|_stg|temp_|_temp)\b|.*#)", "contains DROP TABLE on non-staging/clean/transformed table — remove for safety"),
+    (r"\btruncate\s+table\s+(?!.*\b\w*(?:_clean|_transformed|_stg|temp_|_temp)\b|.*#)", "contains TRUNCATE TABLE on non-staging/clean/transformed table — remove for safety"),
+    (r"\bdelete\s+from\s+(?!.*\b\w*(?:_clean|_transformed|_stg|_dedup|temp_|etl_log|cte|_temp)\b|.*#)", "contains DELETE FROM on non-staging/clean/transformed table — remove for safety"),
 ]
 
 
@@ -57,10 +57,19 @@ def validate_sql_basic_dict(source: str) -> dict:
 
     # Strict DQ Rules Validation
     # 1. Reject pipeline defined but not used
+    # Only flag if etl_rejects is referenced INSIDE stored procedure bodies
+    # (beyond the shared infrastructure CREATE TABLE block).
     if "etl_rejects" in low:
-        pattern_rejects = r"insert\s+into\s+(?:dbo\s*\.\s*)?\[?etl_rejects\]?"
-        if not re.search(pattern_rejects, low):
-            issues.append("etl_rejects table is defined but never inserted into (reject pipeline not used)")
+        # Strip the shared infrastructure CREATE TABLE block for etl_rejects
+        low_no_infra = re.sub(
+            r"if\s+object_id\s*\(\s*'dbo\.etl_rejects'.*?end\s*;\s*go",
+            "", low, flags=re.DOTALL | re.IGNORECASE
+        )
+        # Check if etl_rejects is still referenced (e.g. in procedure comments or statements)
+        if "etl_rejects" in low_no_infra:
+            pattern_rejects = r"insert\s+into\s+(?:dbo\s*\.\s*)?\[?etl_rejects\]?"
+            if not re.search(pattern_rejects, low_no_infra):
+                issues.append("etl_rejects table is defined but never inserted into (reject pipeline not used)")
         
     # 2. Fake default values
     if "'99999'" in low or "'10120631.5'" in low or "'1900-01-01'" in low or "'19000101'" in low:
@@ -107,6 +116,10 @@ def validate_sql_basic_dict(source: str) -> dict:
     if "orderdate" in low or "createddate" in low:
         if not any(x in low for x in ("try_convert(", "try_cast(", "to_date(", "to_datetime(")):
             issues.append("Date columns detected but missing TRY_CAST/TRY_CONVERT date parsing or validation")
+
+    # 11. Empty column wildcard check (symptom of empty metadata)
+    if "select *, @run_id" in low or "select *, @batch_id" in low or "select *," in low:
+        issues.append("contains empty column wildcard select list (symptom of empty metadata)")
 
     if issues:
         return {"valid": False, "issues": issues}

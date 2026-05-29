@@ -275,11 +275,43 @@ def _safe_max_tokens(payload_json: str, engine_key: str) -> int:
     return max(1500, min(cap, available))
 
 
-def _classify_column(col_name: str, col_meta: dict) -> str:
+def _classify_column(col_name: str, col_meta: dict, sem_schema: dict = None, ds_name: str = "") -> str:
     """
     Classify column as 'date', 'id', 'metric', 'categorical', or 'string'.
     """
-    # 0. Check approved semantic_type first if available
+    c_lower = str(col_name).lower().strip()
+    if c_lower in ("etl_batch_id", "run_id", "etl_created_at", "etl_updated_at", "_rn", "_dedup_rn", "etl_run_id", "etl_created_date", "etl_updated_date") or c_lower.startswith("etl_"):
+        return "metadata"
+
+    # 0a. Check semantic_schema (single source of truth)
+    if sem_schema:
+        key = f"{ds_name}.{col_name}"
+        desc = sem_schema.get(key)
+        if desc and isinstance(desc, dict):
+            sub = desc.get("sub_type", "").lower().strip()
+            stype = desc.get("semantic_type", "string").lower().strip()
+            if sub in ("email", "phone", "zip_code", "ssn", "uuid", "pk", "fk", "ip_address"):
+                return "id"
+            if sub in ("currency", "age", "percentage"):
+                return "metric"
+            if sub in ("status_flag", "country", "gender", "boolean_int"):
+                return "categorical"
+            if stype in ("id", "metric", "categorical", "date", "string"):
+                if stype == "text":
+                    return "string"
+                return stype
+
+    # 0b. Check approved sub_type/semantic_type first if available in col_meta
+    sub = (col_meta.get("sub_type") or "").lower().strip()
+    if sub:
+        if sub in ("email", "phone", "zip_code", "ssn", "uuid", "pk", "fk", "ip_address"):
+            return "id"
+        if sub in ("currency", "age", "percentage"):
+            return "metric"
+        if sub in ("status_flag", "country", "gender", "boolean_int"):
+            return "categorical"
+
+    # 0c. Check approved semantic_type first if available
     approved_tag = (col_meta.get("semantic_type") or "").lower().strip()
     if approved_tag in ("id", "metric", "categorical", "date", "text"):
         if approved_tag == "text":
@@ -349,7 +381,8 @@ def _is_numeric_column(col_name: str, col_meta: dict) -> bool:
 
 def _consolidate_and_filter_datasets(
     datasets: Dict[str, Any],
-    source_metadata: Dict[str, Any]
+    source_metadata: Dict[str, Any],
+    sem_schema: Dict[str, Any] = None,
 ) -> Dict[str, Any]:
     cleaned_datasets = {}
     
@@ -413,8 +446,8 @@ def _consolidate_and_filter_datasets(
             if action in ("trim", "lowercase", "uppercase", "sanitize_email"):
                 if col:
                     col_meta = columns_meta.get(col) or {}
-                    col_class = _classify_column(col, col_meta)
-                    if col_class in ("metric", "date"):
+                    col_class = _classify_column(col, col_meta, sem_schema, ds_name)
+                    if col_class in ("metric", "date", "metadata"):
                         continue
             
             # Type-aware filtering: outlier logic is numeric-only
@@ -468,6 +501,7 @@ def _build_codegen_payload(
     output_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     source_metadata: Dict[str, Any] = {}
+    sem_schema = plan.get("semantic_schema") or {}
     for ds_name, meta in (assessment.get("datasets") or {}).items():
         cols = meta.get("columns") or {}
         source_metadata[ds_name] = {
@@ -476,7 +510,9 @@ def _build_codegen_payload(
                 col: {
                     "dtype": cmeta.get("dtype") or cmeta.get("inferred_type"),
                     "null_percentage": cmeta.get("null_percentage"),
-                    "semantic_type": cmeta.get("semantic_type", "unknown"),
+                    "semantic_type": (sem_schema.get(f"{ds_name}.{col}") or {}).get("semantic_type") or cmeta.get("semantic_type", "unknown"),
+                    "sub_type": (sem_schema.get(f"{ds_name}.{col}") or {}).get("sub_type") or cmeta.get("sub_type", "unknown"),
+                    "pii_level": (sem_schema.get(f"{ds_name}.{col}") or {}).get("pii_level") or "none",
                 }
                 for col, cmeta in cols.items()
                 if isinstance(cmeta, dict)
@@ -485,7 +521,7 @@ def _build_codegen_payload(
     
     # Consolidate, deduplicate, type-filter and sort plan steps before passing to LLM
     raw_datasets = plan.get("datasets") or {}
-    cleaned_datasets = _consolidate_and_filter_datasets(raw_datasets, source_metadata)
+    cleaned_datasets = _consolidate_and_filter_datasets(raw_datasets, source_metadata, plan.get("semantic_schema"))
     
     base = {
         "plan_id": plan.get("plan_id"),

@@ -27,10 +27,16 @@ def _connect() -> sqlite3.Connection:
           kind TEXT NOT NULL,
           input_json TEXT NOT NULL,
           result_json TEXT,
-          error TEXT
+          error TEXT,
+          progress INTEGER DEFAULT 0
         )
         """
     )
+    try:
+        conn.execute("ALTER TABLE jobs ADD COLUMN progress INTEGER DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS job_events (
@@ -104,7 +110,7 @@ def fetch_job(job_id: str) -> Optional[Dict[str, Any]]:
     conn = _connect()
     try:
         row = conn.execute(
-            "SELECT job_id, created_at, updated_at, status, kind, input_json, result_json, error FROM jobs WHERE job_id=?",
+            "SELECT job_id, created_at, updated_at, status, kind, input_json, result_json, error, progress FROM jobs WHERE job_id=?",
             (job_id,),
         ).fetchone()
         if not row:
@@ -118,6 +124,7 @@ def fetch_job(job_id: str) -> Optional[Dict[str, Any]]:
             "input": json.loads(row[5]) if row[5] else {},
             "result": json.loads(row[6]) if row[6] else None,
             "error": row[7],
+            "progress": row[8] if row[8] is not None else 0,
         }
     finally:
         conn.close()
@@ -166,6 +173,18 @@ def fetch_events(job_id: str, *, after_id: int = 0, limit: int = 200) -> List[Di
                 }
             )
         return out
+    finally:
+        conn.close()
+
+
+def update_job_progress(job_id: str, progress: int) -> None:
+    conn = _connect()
+    try:
+        conn.execute(
+            "UPDATE jobs SET updated_at=?, progress=? WHERE job_id=?",
+            (time.time(), int(progress), job_id),
+        )
+        conn.commit()
     finally:
         conn.close()
 

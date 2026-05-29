@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "name": "Alice",
+    "age": 25,
+    "joined_date": "2026-01-01"
+  },
+  {
+    "id": 2,
+    "name": "Bob",
+    "age": 30,
+    "joined_date": "2026-02-15"
+  },
+  {
+    "id": 3,
+    "name": "Charlie",
+    "age": 35,
+    "joined_date": "2026-03-10"
+  }
+]

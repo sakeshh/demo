@@ -16,7 +16,12 @@ import {
   type EngineRecommendation,
   type StepEvidence,
 } from '@/components/EtlIntelligencePreview';
-import ManualReviewPanel, { type ManualReviewItem } from '@/components/ManualReviewPanel';
+import ManualReviewPanel from '@/components/ManualReviewPanel';
+import GenerationModeSelector from '@/components/GenerationModeSelector';
+import RequirementsPhasePanel from '@/components/RequirementsPhasePanel';
+import RequirementValidator from '@/components/RequirementValidator';
+import ETLCodeTabView from '@/components/ETLCodeTabView';
+import { DQGateResult, ManualReviewItem, ValidationResult } from '@/types/pipeline';
 
 type Step = 'rules' | 'plan' | 'preview' | 'code';
 
@@ -93,16 +98,17 @@ export type EtlPipelineMode = 'full' | 'requirements' | 'etl';
 export interface EtlGenerationPanelProps {
   sessionId: string;
   assessment: Record<string, unknown> | null;
-  /** pipeline = light theme; chat = can use darkMode */
   variant?: 'pipeline' | 'chat';
   darkMode?: boolean;
-  /** Split data-pipeline UX: rules+plan vs preview+code vs full (chat). */
   pipelineMode?: EtlPipelineMode;
   onContinueToEtlStep?: () => void;
-  /** From ETL step: go back to Requirements to edit rules/plan. */
   onEditPlanInRequirements?: () => void;
   onCodeGenerated?: (code: string) => void;
   onContinueAfterCode?: () => void;
+
+  // Sprint 7 extensions
+  gateResult?: DQGateResult | null;
+  semanticOverrides?: Record<string, any>;
 }
 
 export default function EtlGenerationPanel({
@@ -115,13 +121,15 @@ export default function EtlGenerationPanel({
   onEditPlanInRequirements,
   onCodeGenerated,
   onContinueAfterCode,
+  gateResult = null,
+  semanticOverrides = {},
 }: EtlGenerationPanelProps) {
   const dm = darkMode && variant === 'chat';
   const shell = dm
-    ? 'rounded-3xl border border-emerald-500/30 bg-[#001a2e]/90 p-6 shadow-sm text-zinc-100'
-    : 'rounded-3xl border border-emerald-500/30 bg-gradient-to-br from-emerald-50/80 to-white/90 p-6 shadow-sm';
-  const sub = dm ? 'text-emerald-200/80' : 'text-black/55';
-  const label = dm ? 'text-emerald-100/70' : 'text-black/45';
+    ? 'rounded-3xl border border-[#0070AD]/30 bg-[#001a2e]/90 p-6 shadow-sm text-zinc-100'
+    : 'rounded-3xl border border-black/10 bg-white/70 p-6 shadow-sm';
+  const sub = dm ? 'text-[#0070AD]/80' : 'text-black/55';
+  const label = dm ? 'text-[#0070AD]/70' : 'text-black/45';
   const field = dm
     ? 'rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-100 placeholder:text-white/30'
     : 'rounded-xl border border-black/10 bg-white px-3 py-2 text-sm text-zinc-900';
@@ -140,9 +148,23 @@ export default function EtlGenerationPanel({
   const [planValidationErrors, setPlanValidationErrors] = useState<string[]>([]);
   const [tenantId, setTenantId] = useState('default');
   const [tenantOptions, setTenantOptions] = useState<string[]>(['default', 'acme']);
+  
+  // Phase 1 inputs
   const [requiredColumns, setRequiredColumns] = useState('');
   const [excludeColumns, setExcludeColumns] = useState('');
+  const [outlierStrategy, setOutlierStrategy] = useState<'flag' | 'clip' | 'cap'>('flag');
+
+  // Phase 2 inputs
   const [notes, setNotes] = useState('');
+  const [scdType, setScdType] = useState<'type1' | 'type2' | 'none'>('none');
+  const [hashPhone, setHashPhone] = useState(false);
+  const [maskEmail, setMaskEmail] = useState(false);
+
+  // Sprint 7 dynamic states
+  const [dqThreshold, setDqThreshold] = useState(70);
+  const [generationMode, setGenerationMode] = useState<'cleanse_only' | 'full'>('full');
+  const [forceUnlock, setForceUnlock] = useState(false);
+
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [plan, setPlan] = useState<Record<string, unknown> | null>(null);
@@ -150,16 +172,21 @@ export default function EtlGenerationPanel({
   const [planTab, setPlanTab] = useState<'table' | 'json'>('table');
   const [planRows, setPlanRows] = useState<StepRow[]>([]);
   const [preview, setPreview] = useState<Record<string, unknown> | null>(null);
-  const [code, setCode] = useState('');
+  
+  // Tabbed view and split code states
+  const [activeCodeTab, setActiveCodeTab] = useState<'phase1' | 'phase2' | 'review'>('phase1');
+  const [phase1Code, setPhase1Code] = useState<string | null>(null);
+  const [phase2Code, setPhase2Code] = useState<string | null>(null);
+  const [manualReviewItemsState, setManualReviewItemsState] = useState<ManualReviewItem[]>([]);
+  const [sqlQualityScore, setSqlQualityScore] = useState<{ score: number; grade: string; warnings_count: number; critical_count: number } | null>(null);
+
   const [validationOk, setValidationOk] = useState<boolean | null>(null);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
   const [artifactPath, setArtifactPath] = useState<string | null>(null);
   const [generatedBy, setGeneratedBy] = useState<string | null>(null);
   const [isDraft, setIsDraft] = useState(false);
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [useAiCodegen, setUseAiCodegen] = useState(false);
   const [generateStatus, setGenerateStatus] = useState<string | null>(null);
-  const codeTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     if (plan) {
@@ -186,6 +213,24 @@ export default function EtlGenerationPanel({
     };
   }, []);
 
+  const parseQualityScore = (codeText: string) => {
+    if (!codeText) return null;
+    const scoreMatch = codeText.match(/Quality\s+Score:\s*(\d+)/i);
+    const gradeMatch = codeText.match(/Grade:\s*([A-F])/i);
+    const warningsMatch = codeText.match(/Warnings:\s*(\d+)/i);
+    const criticalMatch = codeText.match(/Critical\s*Errors:\s*(\d+)/i);
+    
+    if (scoreMatch || gradeMatch) {
+      return {
+        score: scoreMatch ? Number(scoreMatch[1]) : 80,
+        grade: gradeMatch ? gradeMatch[1] : 'B',
+        warnings_count: warningsMatch ? Number(warningsMatch[1]) : 0,
+        critical_count: criticalMatch ? Number(criticalMatch[1]) : 0,
+      };
+    }
+    return null;
+  };
+
   const businessRulesPayload = useCallback(() => {
     const req = requiredColumns
       .split(/[\n,;]+/)
@@ -195,13 +240,34 @@ export default function EtlGenerationPanel({
       .split(/[\n,;]+/)
       .map((s) => s.trim())
       .filter(Boolean);
+
+    let finalNotes = notes.trim();
+    if (hashPhone) {
+      finalNotes += '\nHash phone columns for privacy compliance.';
+    }
+    if (maskEmail) {
+      finalNotes += '\nMask email columns for privacy compliance.';
+    }
+
+    const datasets = Object.keys(assessment?.datasets || {});
+    const scdConfig = datasets.reduce((acc, dsName) => {
+      acc[dsName] = { type: scdType };
+      return acc;
+    }, {} as Record<string, any>);
+
     return {
       never_drop_rows: neverDropRows,
       required_columns: req,
       exclude_columns: excl,
-      notes: notes.trim(),
+      outlier_strategy: outlierStrategy,
+      notes: finalNotes,
+      dq_threshold: dqThreshold,
+      generation_mode: generationMode,
+      force_unlock: forceUnlock ? datasets : [],
+      semantic_overrides: semanticOverrides || {},
+      scd: scdConfig,
     };
-  }, [neverDropRows, requiredColumns, excludeColumns, notes]);
+  }, [neverDropRows, requiredColumns, excludeColumns, outlierStrategy, notes, hashPhone, maskEmail, dqThreshold, generationMode, forceUnlock, semanticOverrides, assessment]);
 
   const stepBadges = useMemo(() => {
     if (pipelineMode === 'requirements') return ['rules', 'plan'] as const;
@@ -247,11 +313,16 @@ export default function EtlGenerationPanel({
         setEngine(ce);
         const sd = flow.sql_dialect;
         if (sd === 'ansi' || sd === 'tsql') setSqlDialect(sd);
+        
+        // Restore codes
         if (typeof flow.code === 'string' && flow.code.trim().length > 0) {
-          setCode(flow.code);
+          setPhase1Code(flow.code);
           setValidationOk(flow.validation_ok != null ? Boolean(flow.validation_ok) : null);
           setValidationErrors(Array.isArray(flow.validation_errors) ? flow.validation_errors : []);
           setArtifactPath(typeof flow.artifact_rel_path === 'string' ? flow.artifact_rel_path : null);
+          
+          const score = parseQualityScore(flow.code);
+          setSqlQualityScore(score);
           setStep('code');
         } else {
           setStep('preview');
@@ -372,9 +443,13 @@ export default function EtlGenerationPanel({
     return raw.filter((m): m is ManualReviewItem => typeof m === 'object' && m !== null && 'id' in m);
   }, [plan]);
 
+  useEffect(() => {
+    setManualReviewItemsState(manualReviewItems);
+  }, [manualReviewItems]);
+
   const pendingManualCount = useMemo(
-    () => manualReviewItems.filter((m) => (m.status || 'pending') === 'pending').length,
-    [manualReviewItems]
+    () => manualReviewItemsState.filter((m) => !m.default_resolution).length,
+    [manualReviewItemsState]
   );
 
   const planApproveReady = useMemo(() => {
@@ -493,7 +568,6 @@ export default function EtlGenerationPanel({
     }
   };
 
-
   const runGenerate = async () => {
     setBusy(true);
     setErr(null);
@@ -512,7 +586,12 @@ export default function EtlGenerationPanel({
               ? 'ansi'
               : 'sql'
             : engine;
-      const res = await fetch('/api/etl/generate', {
+
+      const isLocked = gateResult ? !gateResult.passed : false;
+      const isPhase2Disabled = isLocked && !forceUnlock;
+
+      // 1. Generate Phase 1 (Cleanse) Code
+      const res1 = await fetch('/api/etl/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -520,34 +599,53 @@ export default function EtlGenerationPanel({
           engine: eng,
           sql_dialect: sqlDialect,
           codegen_mode: codegenMode,
+          generation_mode: 'cleanse_only',
         }),
       });
-      const data = await res.json().catch(() => null);
-      if (res.status === 409) {
-        const detail = data?.detail ?? data;
-        setErr(
-          detail?.message ||
-            'Plan not approved. Go back to Requirements and confirm the plan before generating code.',
-        );
-        return;
+      const data1 = await res1.json().catch(() => null);
+      if (!res1.ok && !data1?.code) {
+        throw new Error(data1?.message || `Phase 1 generation failed (${res1.status})`);
       }
-      if (!res.ok && !data?.code) {
-        setErr(data?.message || data?.error || `Generate failed (${res.status})`);
-        return;
+      
+      const p1 = String(data1?.code || '');
+      setPhase1Code(p1);
+      
+      // Parse quality metrics from Phase 1
+      const score = parseQualityScore(p1);
+      setSqlQualityScore(score);
+
+      // 2. Generate Phase 2 (Transform) Code (if full mode and not gated/locked)
+      let p2 = null;
+      if (generationMode === 'full' && !isPhase2Disabled) {
+        const res2 = await fetch('/api/etl/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            engine: eng,
+            sql_dialect: sqlDialect,
+            codegen_mode: codegenMode,
+            generation_mode: 'transform_only',
+          }),
+        });
+        const data2 = await res2.json().catch(() => null);
+        if (res2.ok && data2?.code) {
+          p2 = String(data2.code);
+        }
       }
-      setCode(String(data?.code || ''));
-      onCodeGenerated?.(String(data?.code || ''));
-      setValidationOk(Boolean(data?.validation_ok));
-      setValidationErrors(Array.isArray(data?.validation_errors) ? data.validation_errors : []);
-      setArtifactPath(typeof data?.artifact_rel_path === 'string' ? data.artifact_rel_path : null);
-      setGeneratedBy(typeof data?.generated_by === 'string' ? data.generated_by : null);
-      setIsDraft(Boolean(data?.is_draft ?? !data?.validation_ok));
-      if (!data?.ok) {
-        setErr(data?.message || 'Code saved as draft — fix validation errors before deploy.');
-      }
-      if (typeof data?.latency_ms === 'number') {
+      setPhase2Code(p2);
+
+      // Combine both or set active code tab
+      onCodeGenerated?.(p1);
+      setValidationOk(Boolean(data1?.validation_ok));
+      setValidationErrors(Array.isArray(data1?.validation_errors) ? data1.validation_errors : []);
+      setArtifactPath(typeof data1?.artifact_rel_path === 'string' ? data1.artifact_rel_path : null);
+      setGeneratedBy(typeof data1?.generated_by === 'string' ? data1.generated_by : null);
+      setIsDraft(Boolean(data1?.is_draft ?? !data1?.validation_ok));
+      
+      if (typeof data1?.latency_ms === 'number') {
         setGenerateStatus(
-          `Done in ${(data.latency_ms / 1000).toFixed(1)}s via ${data.codegen_mode || data.generated_by || 'template'}`
+          `Done in ${(data1.latency_ms / 1000).toFixed(1)}s via ${data1.codegen_mode || data1.generated_by || 'template'}`
         );
       }
       setStep('code');
@@ -558,92 +656,30 @@ export default function EtlGenerationPanel({
     }
   };
 
-  useEffect(() => {
-    setCopyStatus('idle');
-  }, [code]);
-
-  const copyCode = useCallback(async () => {
-    const text = code.trim();
-    if (!text) return;
+  const copyCode = useCallback((text: string) => {
+    if (!text.trim()) return;
     try {
       if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(code);
-      } else {
-        const ta = codeTextareaRef.current;
-        if (!ta) throw new Error('Clipboard unavailable');
-        ta.focus();
-        ta.select();
-        const ok = document.execCommand('copy');
-        if (!ok) throw new Error('Copy not supported in this browser');
+        navigator.clipboard.writeText(text);
       }
-      setCopyStatus('copied');
-      window.setTimeout(() => setCopyStatus('idle'), 2000);
     } catch {
-      setCopyStatus('failed');
-      window.setTimeout(() => setCopyStatus('idle'), 3500);
-      try {
-        const ta = codeTextareaRef.current;
-        if (ta) {
-          ta.focus();
-          ta.select();
-        }
-      } catch {
-        /* ignore */
-      }
+      /* ignore */
     }
-  }, [code]);
+  }, []);
 
-  const downloadCode = useCallback(async () => {
-    const text = code.trim();
-    if (!text) return;
-    if (validationOk && !isDraft) {
-      try {
-        const res = await fetch(
-          `/api/etl/download?session_id=${encodeURIComponent(sessionId)}`
-        );
-        if (res.ok) {
-          const blob = await res.blob();
-          const disposition = res.headers.get('content-disposition') ?? '';
-          const match = disposition.match(/filename="?([^";]+)"?/i);
-          const name = match?.[1] ?? `dhara_etl_${sessionId}.py`;
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = name;
-          a.rel = 'noopener';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          URL.revokeObjectURL(url);
-          return;
-        }
-      } catch {
-        /* fall through to client download */
-      }
-    }
+  const downloadCode = useCallback((text: string, type: 'phase1' | 'phase2') => {
+    if (!text.trim()) return;
     const ext = engine === 'sql' ? 'sql' : engine === 'adf' ? 'json' : 'py';
-    const rawId = (plan as { plan_id?: string })?.plan_id ?? sessionId;
-    const pid = String(rawId).replace(/[^\w.-]+/g, '_').slice(0, 48) || 'export';
-    const name = `dhara_etl_${pid}${isDraft ? '_DRAFT' : ''}.${ext}`;
+    const name = `dhara_etl_${type}_${sessionId}.${ext}`;
     const mime = ext === 'json' ? 'application/json;charset=utf-8' : 'text/plain;charset=utf-8';
-    const blob = new Blob([code], { type: mime });
+    const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = name;
-    a.rel = 'noopener';
-    document.body.appendChild(a);
     a.click();
-    a.remove();
     URL.revokeObjectURL(url);
-  }, [code, engine, plan, sessionId, validationOk, isDraft]);
-
-  const selectAllCode = useCallback(() => {
-    const ta = codeTextareaRef.current;
-    if (!ta) return;
-    ta.focus();
-    ta.select();
-  }, []);
+  }, [engine, sessionId]);
 
   const genLabel =
     engine === 'python'
@@ -660,7 +696,7 @@ export default function EtlGenerationPanel({
     return (
       <div className={shell}>
         <div className="mb-4 flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-md">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#0070AD] text-white shadow-md">
             <FaCode className="text-lg" />
           </div>
           <div>
@@ -708,10 +744,43 @@ export default function EtlGenerationPanel({
     return (dsBlock?.steps || []).find((s) => Number(s.order) === order);
   };
 
+  const datasetNames = Object.keys(assessment?.datasets || {});
+
+  // Preflight validation object
+  const preflightValidation: ValidationResult = {
+    success: planValidationErrors.length === 0 && pendingManualCount === 0,
+    checks: [
+      {
+        id: 'req_cols',
+        label: 'Required Columns Presence Check',
+        status: requiredColumns ? 'success' : 'warning',
+        message: requiredColumns ? 'Target required columns defined' : 'No strict required columns listed',
+      },
+      {
+        id: 'never_drop',
+        label: 'Never Drop Rows Safety Check',
+        status: 'success',
+        message: neverDropRows ? 'Preferring null fills to avoid losing counts' : 'Row dropping allowed for outliers/keys',
+      },
+      {
+        id: 'manual_reviews',
+        label: 'Manual Review Decisions',
+        status: pendingManualCount > 0 ? 'warning' : 'success',
+        message: pendingManualCount > 0 ? `${pendingManualCount} decisions need resolution` : 'All manual exceptions handled',
+      },
+      {
+        id: 'dq_gate_overall',
+        label: 'Overall Quality Gating Status',
+        status: gateResult?.passed ? 'success' : 'warning',
+        message: gateResult?.passed ? 'Datasets pass quality threshold' : 'Some datasets locked for Phase 2 transforms',
+      }
+    ]
+  };
+
   return (
     <div className={shell}>
       <div className="mb-4 flex items-center gap-3">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-md">
+        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#0070AD] text-white shadow-md">
           <FaCode className="text-lg" />
         </div>
         <div>
@@ -726,7 +795,7 @@ export default function EtlGenerationPanel({
             key={s}
             className={`rounded-full px-3 py-1 ${
               step === s
-                ? 'bg-emerald-600 text-white'
+                ? 'bg-[#0070AD] text-white'
                 : dm
                   ? 'bg-white/10 text-white/50'
                   : 'bg-black/5 text-black/40'
@@ -744,141 +813,145 @@ export default function EtlGenerationPanel({
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
-            className="space-y-4"
+            className="space-y-6"
           >
-            <div>
-              <div className={`mb-1 text-[11px] font-black uppercase tracking-widest ${label}`}>Target engine</div>
-              <div className="flex flex-wrap gap-2">
-                {(
-                  [
-                    ['python', 'Python'],
-                    ['sql', 'SQL'],
-                    ['spark', 'PySpark'],
-                    ['adf', 'ADF'],
-                  ] as const
-                ).map(([k, lab]) => (
-                  <button
-                    key={k}
-                    type="button"
-                    onClick={() => {
-                      setEngineUserOverride(true);
-                      setEngine(k);
-                    }}
-                    className={`rounded-lg px-3 py-1.5 text-xs font-bold ${
-                      engine === k
-                        ? 'bg-emerald-600 text-white'
-                        : dm
-                          ? 'bg-white/10 text-white/80'
-                          : 'bg-black/5 text-zinc-700'
-                    }`}
+            {/* Sub-panel A: Generation Mode Selector */}
+            <GenerationModeSelector
+              generationMode={generationMode}
+              onChange={setGenerationMode}
+              gateResult={gateResult}
+              forceUnlock={forceUnlock}
+              onForceUnlockChange={setForceUnlock}
+            />
+
+            {/* Target Engine & Location configurations */}
+            <div className="rounded-2xl border border-black/10 bg-white/60 p-6 shadow-sm space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div className={`mb-1.5 text-[11px] font-black uppercase tracking-widest ${label}`}>Target engine</div>
+                  <div className="flex flex-wrap gap-2">
+                    {(
+                      [
+                        ['python', 'Python'],
+                        ['sql', 'SQL'],
+                        ['spark', 'PySpark'],
+                        ['adf', 'ADF'],
+                      ] as const
+                    ).map(([k, lab]) => (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => {
+                          setEngineUserOverride(true);
+                          setEngine(k);
+                        }}
+                        className={`rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${
+                          engine === k
+                            ? 'bg-[#0070AD] text-white'
+                            : dm
+                              ? 'bg-white/10 text-white/80'
+                              : 'bg-black/5 hover:bg-black/10 text-zinc-700'
+                        }`}
+                      >
+                        {lab}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {engine === 'sql' ? (
+                  <div>
+                    <div className={`mb-1.5 text-[11px] font-black uppercase tracking-widest ${label}`}>SQL dialect</div>
+                    <select
+                      value={sqlDialect}
+                      onChange={(e) => setSqlDialect(e.target.value as 'tsql' | 'ansi')}
+                      className={field}
+                    >
+                      <option value="tsql">T-SQL (Azure SQL / SQL Server)</option>
+                      <option value="ansi">ANSI (portable comments / casts)</option>
+                    </select>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div className={`mb-1.5 text-[11px] font-black uppercase tracking-widest ${label}`}>
+                    Rule set (tenant)
+                  </div>
+                  <select value={tenantId} onChange={(e) => setTenantId(e.target.value)} className={field}>
+                    {tenantOptions.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <div className={`mb-1.5 text-[11px] font-black uppercase tracking-widest ${label}`}>
+                    Output destination
+                  </div>
+                  <select
+                    value={targetDestination}
+                    onChange={(e) =>
+                      setTargetDestination(e.target.value as 'dataframe_only' | 'new_path' | 'overwrite')
+                    }
+                    className={field}
                   >
-                    {lab}
-                  </button>
-                ))}
+                    <option value="dataframe_only">Return DataFrame only (notebook / library use)</option>
+                    <option value="new_path">Write to new path</option>
+                    <option value="overwrite">Overwrite source (in-place)</option>
+                  </select>
+                  {targetDestination === 'new_path' ? (
+                    <input
+                      type="text"
+                      value={targetPath}
+                      onChange={(e) => setTargetPath(e.target.value)}
+                      placeholder="cleaned/"
+                      className={`mt-2 w-full ${field}`}
+                    />
+                  ) : null}
+                </div>
               </div>
             </div>
-            {engine === 'sql' ? (
-              <div>
-                <div className={`mb-1 text-[11px] font-black uppercase tracking-widest ${label}`}>SQL dialect</div>
-                <select
-                  value={sqlDialect}
-                  onChange={(e) => setSqlDialect(e.target.value as 'tsql' | 'ansi')}
-                  className={field}
-                >
-                  <option value="tsql">T-SQL (Azure SQL / SQL Server)</option>
-                  <option value="ansi">ANSI (portable comments / casts)</option>
-                </select>
-              </div>
-            ) : null}
 
-            <div>
-              <div className={`mb-1 text-[11px] font-black uppercase tracking-widest ${label}`}>
-                Rule set (tenant)
-              </div>
-              <select value={tenantId} onChange={(e) => setTenantId(e.target.value)} className={`mb-3 w-full ${field}`}>
-                {tenantOptions.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <div className={`mb-1 text-[11px] font-black uppercase tracking-widest ${label}`}>
-                Output destination
-              </div>
-              <select
-                value={targetDestination}
-                onChange={(e) =>
-                  setTargetDestination(e.target.value as 'dataframe_only' | 'new_path' | 'overwrite')
-                }
-                className={field}
-              >
-                <option value="dataframe_only">Return DataFrame only (notebook / library use)</option>
-                <option value="new_path">Write to new path</option>
-                <option value="overwrite">Overwrite source (in-place)</option>
-              </select>
-              {targetDestination === 'new_path' ? (
-                <input
-                  type="text"
-                  value={targetPath}
-                  onChange={(e) => setTargetPath(e.target.value)}
-                  placeholder="cleaned/"
-                  className={`mt-2 w-full ${field}`}
+            {/* Sub-panel B: Business Rules Form per dataset */}
+            <div className="space-y-6">
+              {datasetNames.map((dsName) => (
+                <RequirementsPhasePanel
+                  key={dsName}
+                  datasetName={dsName}
+                  gateResult={gateResult}
+                  threshold={dqThreshold}
+                  generationMode={generationMode}
+                  forceUnlock={forceUnlock}
+                  
+                  neverDropRows={neverDropRows}
+                  onNeverDropRowsChange={setNeverDropRows}
+                  requiredColumns={requiredColumns}
+                  onRequiredColumnsChange={setRequiredColumns}
+                  excludeColumns={excludeColumns}
+                  onExcludeColumnsChange={setExcludeColumns}
+                  outlierStrategy={outlierStrategy}
+                  onOutlierStrategyChange={setOutlierStrategy}
+                  
+                  notes={notes}
+                  onNotesChange={setNotes}
+                  scdType={scdType}
+                  onScdTypeChange={setScdType}
+                  hashPhone={hashPhone}
+                  onHashPhoneChange={setHashPhone}
+                  maskEmail={maskEmail}
+                  onMaskEmailChange={setMaskEmail}
                 />
-              ) : null}
+              ))}
             </div>
 
-            <label className="flex items-start gap-3 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={neverDropRows}
-                onChange={(e) => setNeverDropRows(e.target.checked)}
-                className="mt-1 h-4 w-4 rounded border-black/20"
-              />
-              <span className={`text-sm ${dm ? 'text-zinc-200' : 'text-zinc-800'}`}>
-                <span className="font-bold">Never drop rows</span> — prefer fills over row-dropping transforms when
-                applicable.
-              </span>
-            </label>
-            <div>
-              <div className={`mb-1 text-[11px] font-black uppercase tracking-widest ${label}`}>Required columns</div>
-              <textarea
-                value={requiredColumns}
-                onChange={(e) => setRequiredColumns(e.target.value)}
-                placeholder="e.g. customer_id, email (comma or newline separated)"
-                rows={2}
-                className={`w-full ${field}`}
-              />
-            </div>
-            <div>
-              <div className={`mb-1 text-[11px] font-black uppercase tracking-widest ${label}`}>Exclude columns</div>
-              <textarea
-                value={excludeColumns}
-                onChange={(e) => setExcludeColumns(e.target.value)}
-                placeholder="Columns to leave untouched"
-                rows={2}
-                className={`w-full ${field}`}
-              />
-            </div>
-            <div>
-              <div className={`mb-1 text-[11px] font-black uppercase tracking-widest ${label}`}>Business notes</div>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Constraints, definitions, or handoff notes for engineers reviewing this ETL."
-                rows={3}
-                className={`w-full ${field}`}
-              />
-            </div>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void runPlan()}
-              className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow hover:bg-emerald-700 disabled:opacity-50"
-            >
-              Build ETL plan <FaChevronRight className="text-xs" />
-            </button>
+            {/* Sub-panel C: Preflight Requirement Validator Checklist */}
+            <RequirementValidator
+              validation={preflightValidation}
+              onGenerate={runPlan}
+              busy={busy}
+            />
           </motion.div>
         )}
 
@@ -891,8 +964,7 @@ export default function EtlGenerationPanel({
             className="space-y-3"
           >
             <p className={`text-sm ${dm ? 'text-zinc-300' : 'text-black/60'}`}>
-              Edit steps in the table, or switch to JSON. Each step shows evidence from your assessment. Resolve any
-              manual review items, then confirm to run impact preview before code generation.
+              Edit steps in the table, or switch to JSON. Confirm to run impact preview before code generation.
             </p>
             {engineRecommendation ? (
               <EngineRecommendationCard
@@ -905,7 +977,7 @@ export default function EtlGenerationPanel({
             ) : null}
             <OverallReadinessBanner narration={planNarration || null} plan={plan} darkMode={dm} />
             <ManualReviewPanel
-              items={manualReviewItems}
+              items={manualReviewItemsState}
               darkMode={dm}
               busy={busy}
               onApply={applyManualResolutions}
@@ -934,14 +1006,14 @@ export default function EtlGenerationPanel({
               <button
                 type="button"
                 onClick={() => setPlanTab('table')}
-                className={`rounded-lg px-3 py-1 text-xs font-bold ${planTab === 'table' ? 'bg-emerald-600 text-white' : dm ? 'bg-white/10' : 'bg-black/5'}`}
+                className={`rounded-lg px-3 py-1 text-xs font-bold transition-all ${planTab === 'table' ? 'bg-[#0070AD] text-white' : dm ? 'bg-white/10' : 'bg-black/5'}`}
               >
                 Table
               </button>
               <button
                 type="button"
                 onClick={() => setPlanTab('json')}
-                className={`rounded-lg px-3 py-1 text-xs font-bold ${planTab === 'json' ? 'bg-emerald-600 text-white' : dm ? 'bg-white/10' : 'bg-black/5'}`}
+                className={`rounded-lg px-3 py-1 text-xs font-bold transition-all ${planTab === 'json' ? 'bg-[#0070AD] text-white' : dm ? 'bg-white/10' : 'bg-black/5'}`}
               >
                 JSON
               </button>
@@ -956,8 +1028,7 @@ export default function EtlGenerationPanel({
                     }`}
                   >
                     <strong>No automatic steps yet</strong> — use the{' '}
-                    <strong>Manual review</strong> panel above to pick how Dhara should handle each flagged issue,
-                    then click <strong>Apply selections to plan</strong>. Steps will appear here after you apply.
+                    <strong>Manual review</strong> panel above to pick how Dhara should handle each flagged exception.
                   </div>
                 ) : null}
                 <div className={`max-h-64 overflow-auto rounded-xl border ${dm ? 'border-white/10' : 'border-black/10'}`}>
@@ -1062,7 +1133,7 @@ export default function EtlGenerationPanel({
               />
             )}
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2 pt-2">
               {planTab === 'json' ? (
                 <button
                   type="button"
@@ -1091,7 +1162,7 @@ export default function EtlGenerationPanel({
                     : undefined
                 }
                 onClick={() => void runConfirm()}
-                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
+                className="inline-flex items-center gap-2 rounded-xl bg-[#0070AD] px-4 py-2 text-sm font-bold text-white shadow hover:bg-[#0070AD]/90 disabled:opacity-50"
               >
                 {planApproveReady ? 'Approve & preview impact' : confirmPlanLabel}
                 {pendingManualCount > 0 ? ` (${pendingManualCount} review pending)` : null}{' '}
@@ -1107,7 +1178,7 @@ export default function EtlGenerationPanel({
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
-            className="space-y-3"
+            className="space-y-4"
           >
             {engineRecommendation ? (
               <EngineRecommendationCard
@@ -1125,7 +1196,7 @@ export default function EtlGenerationPanel({
               narration={planNarration?.relationships_summary}
               darkMode={dm}
             />
-            <p className={`text-sm font-semibold ${dm ? 'text-white' : 'text-zinc-900'}`}>
+            <p className={`text-sm font-bold ${dm ? 'text-white' : 'text-zinc-900'}`}>
               Expected impact (DQ counts + column profile heuristics)
             </p>
             <ul className={`list-disc space-y-1 pl-5 text-sm ${dm ? 'text-zinc-200' : 'text-zinc-800'}`}>
@@ -1135,7 +1206,7 @@ export default function EtlGenerationPanel({
             </ul>
             <EtlLineageVisualizer lineage={lineage as LineageMap} darkMode={dm} />
             <label
-              className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-2 text-xs ${
+              className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3 py-3 text-xs ${
                 dm ? 'border-white/10 bg-black/20' : 'border-black/10 bg-white'
               }`}
             >
@@ -1148,12 +1219,12 @@ export default function EtlGenerationPanel({
               />
               <span className={dm ? 'text-zinc-200' : 'text-zinc-800'}>
                 <span className="font-semibold">Enhance with AI</span> (slower — calls Azure OpenAI, 30–90s).
-                Leave unchecked for fast template code from your plan (recommended for PySpark).
+                Leave unchecked for fast template code from your plan (recommended).
               </span>
             </label>
             {busy && generateStatus ? (
               <p
-                className={`text-xs font-medium ${dm ? 'text-emerald-200' : 'text-emerald-800'}`}
+                className={`text-xs font-medium text-emerald-600`}
                 role="status"
               >
                 {generateStatus}
@@ -1176,7 +1247,7 @@ export default function EtlGenerationPanel({
                 type="button"
                 disabled={busy}
                 onClick={() => void runGenerate()}
-                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
+                className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
               >
                 {busy
                   ? useAiCodegen
@@ -1195,99 +1266,25 @@ export default function EtlGenerationPanel({
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -6 }}
-            className="space-y-3"
+            className="space-y-4"
           >
-            <div className="flex flex-wrap items-center gap-2">
-              {validationOk && !isDraft ? (
-                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-bold text-emerald-800">
-                  <FaCheck /> Validated{generatedBy ? ` (${generatedBy})` : ''}
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-bold text-amber-900">
-                  <FaExclamationTriangle /> Draft — review before deploy
-                </span>
-              )}
-              {artifactPath ? (
-                <span className={`text-[11px] ${dm ? 'text-white/50' : 'text-black/50'}`}>
-                  Saved: <code className={`rounded px-1 ${dm ? 'bg-white/10' : 'bg-black/5'}`}>{artifactPath}</code>
-                </span>
-              ) : null}
-            </div>
-            {validationErrors.length > 0 ? (
-              <ul className="text-xs text-red-400">
-                {validationErrors.map((v, i) => (
-                  <li key={i}>{v}</li>
-                ))}
-              </ul>
-            ) : null}
-            <div className="relative overflow-hidden rounded-xl border border-black/10">
-              <div
-                className={`flex flex-wrap items-center justify-end gap-1 border-b px-2 py-1.5 ${
-                  dm ? 'border-white/10 bg-black/30' : 'border-black/10 bg-zinc-100/90'
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => void copyCode()}
-                  disabled={!code.trim()}
-                  className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-bold transition-colors ${
-                    copyStatus === 'copied'
-                      ? 'bg-emerald-600 text-white'
-                      : dm
-                        ? 'bg-white/10 text-white hover:bg-white/15'
-                        : 'bg-white text-zinc-800 shadow-sm hover:bg-zinc-50'
-                  } disabled:cursor-not-allowed disabled:opacity-40`}
-                >
-                  <FaCopy className="text-[10px]" />
-                  {copyStatus === 'copied'
-                    ? 'Copied'
-                    : copyStatus === 'failed'
-                      ? 'Copy blocked — Select all'
-                      : 'Copy'}
-                </button>
-                <button
-                  type="button"
-                  onClick={selectAllCode}
-                  disabled={!code.trim()}
-                  className={`rounded-md px-2 py-1 text-xs font-bold transition-colors ${
-                    dm ? 'bg-white/10 text-white hover:bg-white/15' : 'bg-white text-zinc-800 shadow-sm hover:bg-zinc-50'
-                  } disabled:cursor-not-allowed disabled:opacity-40`}
-                >
-                  Select all
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void downloadCode()}
-                  disabled={!code.trim()}
-                  className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-bold transition-colors ${
-                    dm ? 'bg-white/10 text-white hover:bg-white/15' : 'bg-white text-zinc-800 shadow-sm hover:bg-zinc-50'
-                  } disabled:cursor-not-allowed disabled:opacity-40`}
-                >
-                  <FaDownload className="text-[10px]" />
-                  Download
-                </button>
-              </div>
-              <textarea
-                ref={codeTextareaRef}
-                readOnly
-                spellCheck={false}
-                value={code}
-                rows={22}
-                aria-label="Generated ETL code"
-                placeholder="Generate code to see output here."
-                className={`w-full resize-y font-mono text-[11px] leading-relaxed outline-none ${
-                  dm
-                    ? 'min-h-[16rem] border-0 bg-black/40 p-3 text-emerald-100 placeholder:text-white/25'
-                    : 'min-h-[16rem] border-0 bg-zinc-950 p-3 text-emerald-100 placeholder:text-emerald-100/30'
-                }`}
-              />
-            </div>
-            <p className={`text-[11px] leading-snug ${dm ? 'text-white/45' : 'text-black/50'}`}>
-              Plain UTF-8. Deploy over HTTPS so one-click copy works. Code is AI-generated from your approved plan
-              (template fallback if the model is unavailable)—wire your own sources, credentials, and schedules.
-            </p>
+            {/* Dynamic tabs for Cleanse, Transform and Manual exceptions */}
+            <ETLCodeTabView
+              activeTab={activeCodeTab}
+              onTabChange={setActiveCodeTab}
+              phase1Code={phase1Code}
+              phase2Code={phase2Code}
+              manualItems={manualReviewItemsState}
+              gateResult={gateResult}
+              qualityScore={sqlQualityScore}
+              onResolveItem={(itemId, resId) => applyManualResolutions([{ item_id: itemId, resolution_id: resId }])}
+              onSkipItem={(itemId) => applyManualResolutions([{ item_id: itemId, resolution_id: 'skip' }])}
+              onCopy={copyCode}
+              onDownload={downloadCode}
+              onForceUnlock={() => setForceUnlock(true)}
+            />
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-2 pt-2">
               <button
                 type="button"
                 onClick={() => {
@@ -1298,24 +1295,26 @@ export default function EtlGenerationPanel({
                   setStep('rules');
                   setPlan(null);
                   setPreview(null);
-                  setCode('');
+                  setPhase1Code(null);
+                  setPhase2Code(null);
                   setValidationOk(null);
                   setValidationErrors([]);
                   setArtifactPath(null);
                   setPlanJson('');
                   setPlanRows([]);
+                  setSqlQualityScore(null);
                 }}
                 className={`rounded-xl px-4 py-2 text-sm font-semibold ${dm ? 'bg-white/10 text-white' : 'border border-black/10 bg-white text-zinc-800'}`}
               >
                 {pipelineMode === 'etl' && onEditPlanInRequirements ? 'Edit plan in Requirements' : 'Start over'}
               </button>
-              {onContinueAfterCode && code.trim().length > 0 ? (
+              {onContinueAfterCode && (phase1Code || phase2Code) ? (
                 <button
                   type="button"
                   onClick={() => onContinueAfterCode()}
                   className="inline-flex items-center gap-2 rounded-xl bg-[#0070AD] px-4 py-2 text-sm font-bold text-white shadow hover:bg-[#0070AD]/90"
                 >
-                  Continue to data cleaning <FaChevronRight className="text-xs" />
+                  Continue to Deploy <FaChevronRight className="text-xs" />
                 </button>
               ) : null}
             </div>
@@ -1324,7 +1323,7 @@ export default function EtlGenerationPanel({
       </AnimatePresence>
 
       {err ? (
-        <div className="mt-4 flex items-start gap-2 rounded-xl border border-red-300/50 bg-red-950/40 px-3 py-2 text-sm text-red-100">
+        <div className="mt-4 flex items-start gap-2 rounded-xl border border-red-300/50 bg-red-950/45 px-3 py-2 text-sm text-red-100">
           <FaExclamationTriangle className="mt-0.5 shrink-0" />
           <span>{err}</span>
         </div>

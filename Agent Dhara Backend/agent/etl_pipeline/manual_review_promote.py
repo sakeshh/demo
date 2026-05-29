@@ -135,15 +135,17 @@ def apply_manual_resolutions(
         block = datasets.setdefault(ds, {"steps": []})
         steps: List[Dict[str, Any]] = list(block.get("steps") or [])
         pri = _ACTION_PRIORITY.get(action, 80)
+        res_bucket = classify_step_bucket(
+            action,
+            severity=str(item.get("severity") or "medium"),
+            never_drop_rows=never_drop,
+        )
         step = {
             "order": len(steps) + 1,
             "column": col,
             "action": action,
-            "bucket": classify_step_bucket(
-                action,
-                severity=str(item.get("severity") or "medium"),
-                never_drop_rows=never_drop,
-            ),
+            "bucket": res_bucket["bucket"],
+            "phase": res_bucket["phase"],
             "source_issue_type": issue_type,
             "severity": item.get("severity") or "medium",
             "priority": pri,

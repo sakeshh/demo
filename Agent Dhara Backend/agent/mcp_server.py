@@ -89,6 +89,7 @@ class AssessPayload(BaseModel):
     sources_path: Optional[str] = None
     do_transform: Optional[bool] = None
     approved_semantics: Optional[Dict[str, Dict[str, str]]] = None
+    session_id: Optional[str] = "default"
 
 
 class SemanticInferencePayload(BaseModel):
@@ -118,6 +119,7 @@ class EtlPlanPayload(BaseModel):
     tenant_id: Optional[str] = "default"
     source_context: Optional[Dict[str, Any]] = None
     engine_user_override: Optional[bool] = False
+    generation_mode: Optional[str] = "full"
 
 
 class EtlConfirmPayload(BaseModel):
@@ -136,6 +138,11 @@ class EtlGeneratePayload(BaseModel):
     engine: Optional[str] = "python"
     sql_dialect: Optional[str] = "tsql"
     codegen_mode: Optional[str] = None  # template | llm | llm_then_template
+    generation_mode: Optional[str] = "full"
+
+
+class EtlDeployPayload(BaseModel):
+    session_id: str = "default"
 
 
 setup_logging()
@@ -394,7 +401,16 @@ def api_assess(payload: AssessPayload, request: Request) -> Dict[str, Any]:
         selected_sources=selected_sources,
         request_id=getattr(getattr(request, "state", None), "request_id", "") or "",
         approved_semantics=payload.approved_semantics,
+        session_id=payload.session_id or "default",
     )
+    
+    session_id = payload.session_id or "default"
+    from agent.session_store import load_session, save_session
+    sess = load_session(session_id)
+    sess["session_state"] = "assessed"
+    sess.setdefault("context", {})["last_assessment_result"] = result
+    save_session(sess)
+
     return {"ok": True, "result": result}
 
 
@@ -569,6 +585,17 @@ def api_infer_semantics(payload: SemanticInferencePayload) -> Dict[str, Any]:
     return {"ok": True, "semantics": result_semantics, "samples": samples}
 
 
+@app.post("/etl/enrich-semantics")
+def api_enrich_semantics(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Enrich low-confidence columns.
+    """
+    from agent.etl_pipeline.semantic_llm_enricher import enrich_low_confidence_columns
+    low_confidence_cols = payload.get("low_confidence_cols") or {}
+    enriched = enrich_low_confidence_columns(low_confidence_cols)
+    return {"ok": True, "enriched": enriched}
+
+
 @app.post("/etl/plan")
 def api_etl_plan(payload: EtlPlanPayload) -> Dict[str, Any]:
     """Build ETL plan from assessment + business rules; stores under session.context.etl_flow."""
@@ -586,6 +613,7 @@ def api_etl_plan(payload: EtlPlanPayload) -> Dict[str, Any]:
         tenant_id=payload.tenant_id or "default",
         source_context=payload.source_context,
         engine_user_override=bool(payload.engine_user_override),
+        generation_mode=payload.generation_mode,
     )
 
 
@@ -626,10 +654,62 @@ def api_etl_generate(payload: EtlGeneratePayload) -> Dict[str, Any]:
         engine=payload.engine or "python",
         sql_dialect=payload.sql_dialect or "tsql",
         codegen_mode=payload.codegen_mode,
+        generation_mode=payload.generation_mode,
     )
     if not result.get("ok") and result.get("http_status") == 409:
         raise HTTPException(status_code=409, detail=result)
     return result
+
+
+@app.post("/etl/deploy")
+def api_etl_deploy(payload: EtlDeployPayload) -> Dict[str, Any]:
+    from agent.etl_handlers import etl_deploy
+    return etl_deploy(payload.session_id)
+
+
+@app.get("/etl/dq-gate")
+def api_etl_dq_gate(session_id: str, dataset: str, threshold: float = 70.0) -> Dict[str, Any]:
+    """Check dataset against the DQ Gate threshold."""
+    from agent.session_store import load_session
+    from agent.etl_pipeline.dq_gate import check_dq_gate
+
+    sid = (session_id or "default").strip() or "default"
+    sess = load_session(sid)
+    ctx = sess.setdefault("context", {})
+    assess = ctx.get("last_assessment_result")
+    if not assess:
+        raise HTTPException(status_code=400, detail="No assessment found for session")
+
+    try:
+        res = check_dq_gate(assess, dataset, threshold=threshold)
+        return {"ok": True, "gate": res}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/etl/phases")
+def api_etl_phases(session_id: str) -> Dict[str, Any]:
+    """Retrieve split cleanse and transform plans for visual/phase routing."""
+    from agent.session_store import load_session
+    from agent.etl_pipeline.phase_classifier import split_plan_phases
+
+    sid = (session_id or "default").strip() or "default"
+    sess = load_session(sid)
+    ctx = sess.setdefault("context", {})
+    flow = ctx.get("etl_flow") or {}
+    plan = flow.get("plan")
+    if not plan:
+        raise HTTPException(status_code=400, detail="No plan found for session")
+
+    try:
+        cleanse_plan, transform_plan = split_plan_phases(plan)
+        return {
+            "ok": True,
+            "cleanse_plan": cleanse_plan,
+            "transform_plan": transform_plan,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def _etl_safe_segment(s: str) -> str:
@@ -753,6 +833,24 @@ def api_get_job(job_id: str) -> Dict[str, Any]:
     if not j:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"ok": True, "job": j}
+
+
+@app.get("/etl/assessment/status/{job_id}")
+def api_etl_assessment_status(job_id: str) -> Dict[str, Any]:
+    j = fetch_job(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="Job not found")
+    status = j.get("status")
+    if status == "succeeded":
+        status = "completed"
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": status,
+        "progress": j.get("progress", 0),
+        "error": j.get("error"),
+        "result": j.get("result") if status == "completed" else None
+    }
 
 
 @app.get("/jobs/{job_id}/events")

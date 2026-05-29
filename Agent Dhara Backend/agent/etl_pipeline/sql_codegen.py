@@ -38,17 +38,65 @@ def _get_clean_table_name(ds_name: str) -> str:
     return f"{schema}.{clean_tbl}"
 
 
+def _get_transformed_table_name(ds_name: str) -> str:
+    """Resolve raw table name to its transformed table equivalent."""
+    parts = ds_name.split(".", 1)
+    if len(parts) == 2:
+        schema, tbl_name = parts[0], parts[1]
+    else:
+        schema, tbl_name = "dbo", ds_name
+    
+    schema = schema.strip("[]")
+    tbl_name = tbl_name.strip("[]")
+    
+    if tbl_name.lower().endswith("_raw"):
+        trans_tbl = tbl_name[:-4] + "_Transformed"
+    elif tbl_name.lower().endswith("_clean"):
+        trans_tbl = tbl_name[:-6] + "_Transformed"
+    else:
+        trans_tbl = tbl_name + "_Transformed"
+        
+    return f"{schema}.{trans_tbl}"
+
+
 def _indent(lines_list: List[str], spaces: int = 8) -> List[str]:
     """Prefix all non-empty lines with indentation spaces."""
     prefix = " " * spaces
     return [prefix + line if line.strip() else line for line in lines_list]
 
 
-def _classify_column(col_name: str, col_meta: dict) -> str:
+def _classify_column(col_name: str, col_meta: dict, sem_schema: dict = None, ds_name: str = "") -> str:
     """
     Classify column as 'date', 'id', 'metric', 'categorical', or 'string'.
     """
-    # 0. Check approved semantic_type first if available
+    # 0a. Check semantic_schema (single source of truth)
+    if sem_schema:
+        key = f"{ds_name}.{col_name}"
+        desc = sem_schema.get(key)
+        if desc and isinstance(desc, dict):
+            sub = desc.get("sub_type", "").lower().strip()
+            stype = desc.get("semantic_type", "string").lower().strip()
+            if sub in ("email", "phone", "zip_code", "ssn", "uuid", "pk", "fk", "ip_address"):
+                return "id"
+            if sub in ("currency", "age", "percentage"):
+                return "metric"
+            if sub in ("status_flag", "country", "gender", "boolean_int"):
+                return "categorical"
+            if stype in ("id", "metric", "categorical", "date", "string"):
+                if stype == "text":
+                    return "string"
+                return stype
+
+    # 0b. Check approved sub_type/semantic_type first if available in col_meta
+    sub = (col_meta.get("sub_type") or "").lower().strip()
+    if sub:
+        if sub in ("email", "phone", "zip_code", "ssn", "uuid", "pk", "fk", "ip_address"):
+            return "id"
+        if sub in ("currency", "age", "percentage"):
+            return "metric"
+        if sub in ("status_flag", "country", "gender", "boolean_int"):
+            return "categorical"
+
     approved_tag = (col_meta.get("semantic_type") or "").lower().strip()
     if approved_tag in ("id", "metric", "categorical", "date", "text"):
         if approved_tag == "text":
@@ -93,7 +141,7 @@ def _classify_column(col_name: str, col_meta: dict) -> str:
     return "string"
 
 
-def compile_column_expression(col_name: str, transforms: List[dict], col_meta: dict, business_rules: dict) -> str:
+def compile_column_expression(col_name: str, transforms: List[dict], col_meta: dict, business_rules: dict, sem_schema: dict = None, ds_name: str = "") -> str:
     # Start with the raw column identifier
     expr = f"[{col_name}]"
     
@@ -112,7 +160,7 @@ def compile_column_expression(col_name: str, transforms: List[dict], col_meta: d
         
     for st in transforms:
         action = st.get("action")
-        col_class = _classify_column(col_name, col_meta)
+        col_class = _classify_column(col_name, col_meta, sem_schema, ds_name)
         
         if action == "trim":
             if col_class not in ("metric", "date"):
@@ -182,6 +230,7 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
     plan_id = str(plan.get("plan_id") or "unknown")
     business_rules: Dict[str, Any] = plan.get("business_rules") or {}
     excluded_columns: List[str] = business_rules.get("exclude_columns") or []
+    valid_values = business_rules.get("valid_values") or {}
 
     lines: List[str] = [
         f"-- ETL SQL — Agent Dhara — plan_id={plan_id}",
@@ -371,873 +420,996 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
     if not ds_plan:
         lines.append("-- No datasets found in plan.")
 
+    generation_mode = str(plan.get("generation_mode") or "full").lower()
+
     for ds_name, block in ds_plan.items():
         tbl_base = ds_name.split(".")[-1].strip("[]")
         tbl_clean = _get_clean_table_name(ds_name)
+        tbl_transformed = _get_transformed_table_name(ds_name)
         
-        raw_tbl = tsql_qualified_name(ds_name) if dialect == "tsql" else _brk(ds_name)
-        clean_tbl = tsql_qualified_name(tbl_clean) if dialect == "tsql" else _brk(tbl_clean)
-        tbl_staging = f"#{tbl_base}_Staging"
-        
-        # Consolidate, filter, and sort steps for this dataset
-        ds_info = assessment.get("datasets", {}).get(ds_name) or {} if assessment else {}
-        cols_info = ds_info.get("columns") or {}
-        
-        filtered_steps = []
-        seen_operations = set()
-        
-        for st in (block.get("steps") or []):
-            if not isinstance(st, dict):
-                continue
-            action = str(st.get("action") or "").strip().lower()
-            col = st.get("column")
+        phases_to_gen = []
+        if generation_mode in ("cleanse_only", "full"):
+            phases_to_gen.append("clean")
+        if generation_mode in ("transform_only", "full"):
+            phases_to_gen.append("transform")
             
-            # Type-aware filtering for string operations
-            if action in ("trim", "lowercase", "uppercase", "sanitize_email"):
-                if col:
-                    col_meta = cols_info.get(col) or {}
-                    col_class = _classify_column(col, col_meta)
-                    if col_class in ("metric", "date"):
-                        continue
-                        
-            # Type-aware filtering for outlier actions
-            if action in ("flag_outliers", "clip_or_flag", "clip_outliers", "cap_outliers"):
-                if col:
-                    col_meta = cols_info.get(col) or {}
-                    col_class = _classify_column(col, col_meta)
-                    if col_class != "metric":
-                        continue
-                        
-            # Operation deduplication / normalization
-            norm_action = action
-            if action in ("clip_or_flag", "flag_outliers"):
-                norm_action = "flag_outliers"
-            elif action in ("fill_nulls_simple", "fill_or_drop"):
-                norm_action = "fill_or_drop"
-            elif action in ("clip_outliers", "cap_outliers"):
-                norm_action = "modify_outliers"
+        for ph in phases_to_gen:
+            is_clean = (ph == "clean")
+            sp_name = f"etl_clean_{tbl_base}" if is_clean else f"etl_transform_{tbl_base}"
+            
+            # Resolve SCD Type for this dataset phase
+            # Check per-dataset SCD config first (e.g. business_rules["scd"]["dbo.table"]["type"])
+            scd_config = (business_rules.get("scd") or {}).get(ds_name) or {}
+            scd_type_raw = scd_config.get("type") or block.get("scd_type") or business_rules.get("scd_type") or "type1"
+            scd_type = str(scd_type_raw).lower().replace(" ", "")
+            # Normalize common aliases
+            if scd_type in ("scd2", "scd_type_2", "scd_type2", "type_2"):
+                scd_type = "type2"
+            elif scd_type in ("scd1", "scd_type_1", "scd_type1", "type_1"):
+                scd_type = "type1"
+            if scd_type not in ("type1", "type2", "append", "truncate"):
+                scd_type = "type1"
+            
+            src_tbl_expr = tsql_qualified_name(ds_name) if is_clean else tsql_qualified_name(tbl_clean)
+            tgt_tbl_expr = tsql_qualified_name(tbl_clean) if is_clean else tsql_qualified_name(tbl_transformed)
+            if dialect != "tsql":
+                src_tbl_expr = _brk(ds_name) if is_clean else _brk(tbl_clean)
+                tgt_tbl_expr = _brk(tbl_clean) if is_clean else _brk(tbl_transformed)
                 
-            op_key = (norm_action, str(col).lower() if col else None)
-            if op_key in seen_operations:
-                continue
-            seen_operations.add(op_key)
-            
-            filtered_steps.append(st)
-            
-        priority = {
-            "trim": 10,
-            "lowercase": 11,
-            "uppercase": 11,
-            "sanitize_email": 12,
-            "coerce_numeric": 20,
-            "cast_type": 21,
-            "zero_to_null": 30,
-            "fill_or_drop": 40,
-            "fill_nulls_simple": 40,
-            "parse_dates": 50,
-            "regex_replace": 60,
-            "replace_values": 61,
-            "standardize_boolean": 62,
-            "normalize_phone": 63,
-            "hash_phone": 64,
-            "mask_phone": 65,
-            "range_clip": 70,
-            "clip_or_flag": 71,
-            "flag_outliers": 72,
-            "clip_outliers": 73,
-            "cap_outliers": 74,
-            "deduplicate": 80,
-            "validate_referential_integrity_or_stage": 90
-        }
+            target_tbl_str = tbl_clean if is_clean else tbl_transformed
+            raw_tbl = src_tbl_expr
+            clean_tbl = tgt_tbl_expr
+            tbl_clean = target_tbl_str
+            tbl_staging = f"#{tbl_base}_Staging" if is_clean else f"#{tbl_base}_Transform_Staging"
+            tbl_base = ds_name.split(".")[-1].strip("[]")
+            tbl_clean = _get_clean_table_name(ds_name)
         
-        def get_step_priority(st):
-            act = str(st.get("action") or "").strip().lower()
-            return priority.get(act, 99)
-            
-        steps = sorted(filtered_steps, key=get_step_priority)
-        for idx, st in enumerate(steps):
-            st_copy = dict(st)
-            st_copy["order"] = idx + 1
-            steps[idx] = st_copy
+        
+            # Filter steps for current phase
+            from agent.etl_pipeline.phase_classifier import classify_action_phase
+            steps_raw = block.get("steps") or []
+            steps_phase = []
+            for st in steps_raw:
+                act_phase = classify_action_phase(st.get("action"))
+                if is_clean and act_phase == "cleanse":
+                    steps_phase.append(st)
+                elif not is_clean and act_phase == "transform":
+                    steps_phase.append(st)
 
-        never_drop = bool(business_rules.get("never_drop_rows"))
-        local_excluded_columns = set(excluded_columns)
-        skipped_comments = []
-        for st in steps:
-            if st.get("action") in ("exclude_column", "drop_column") and st.get("column"):
-                col_name = st.get("column")
-                local_excluded_columns.add(col_name)
-                skipped_comments.append(f"-- Column {col_name} skipped via exclude_column transform step")
-        
-        # Meta extraction for keys, indexing and incremental loading
-        cols = []
-        pk_col = None
-        watermark_col = None
-        if assessment and "datasets" in assessment:
-            ds_info = assessment["datasets"].get(ds_name) or {}
+            # Consolidate, filter, and sort steps for this dataset
+            ds_info = assessment.get("datasets", {}).get(ds_name) or {} if assessment else {}
             cols_info = ds_info.get("columns") or {}
-            cols = [c for c in cols_info.keys() if c not in local_excluded_columns]
-            for col_name, cmeta in cols_info.items():
-                if cmeta.get("candidate_primary_key") and not pk_col:
-                    pk_col = col_name
+        
+            filtered_steps = []
+            seen_operations = set()
+        
+            for st in steps_phase:
+                if not isinstance(st, dict):
+                    continue
+                action = str(st.get("action") or "").strip().lower()
+                col = st.get("column")
             
-            # Prioritized watermark selection
-            for col_name in cols_info.keys():
-                col_lower = col_name.lower()
-                if any(x in col_lower for x in ("modified", "update", "changed")) or col_lower.endswith("_at"):
-                    if "date" in col_lower or "time" in col_lower or "stamp" in col_lower or col_lower.endswith("_at"):
-                        watermark_col = col_name
-                        break
-            if not watermark_col:
+                # Type-aware filtering for string operations
+                if action in ("trim", "lowercase", "uppercase", "sanitize_email"):
+                    if col:
+                        col_meta = cols_info.get(col) or {}
+                        col_class = _classify_column(col, col_meta, plan.get("semantic_schema"), ds_name)
+                        if col_class in ("metric", "date"):
+                            continue
+                        
+                # Type-aware filtering for outlier actions
+                if action in ("flag_outliers", "clip_or_flag", "clip_outliers", "cap_outliers"):
+                    if col:
+                        col_meta = cols_info.get(col) or {}
+                        col_class = _classify_column(col, col_meta, plan.get("semantic_schema"), ds_name)
+                        if col_class != "metric":
+                            continue
+                        
+                # Operation deduplication / normalization
+                norm_action = action
+                if action in ("clip_or_flag", "flag_outliers"):
+                    norm_action = "flag_outliers"
+                elif action in ("fill_nulls_simple", "fill_or_drop"):
+                    norm_action = "fill_or_drop"
+                elif action in ("clip_outliers", "cap_outliers"):
+                    norm_action = "modify_outliers"
+                
+                op_key = (norm_action, str(col).lower() if col else None)
+                if op_key in seen_operations:
+                    continue
+                seen_operations.add(op_key)
+            
+                filtered_steps.append(st)
+            
+            priority = {
+                "trim": 10,
+                "lowercase": 11,
+                "uppercase": 11,
+                "sanitize_email": 12,
+                "coerce_numeric": 20,
+                "cast_type": 21,
+                "zero_to_null": 30,
+                "fill_or_drop": 40,
+                "fill_nulls_simple": 40,
+                "parse_dates": 50,
+                "regex_replace": 60,
+                "replace_values": 61,
+                "standardize_boolean": 62,
+                "normalize_phone": 63,
+                "hash_phone": 64,
+                "mask_phone": 65,
+                "range_clip": 70,
+                "clip_or_flag": 71,
+                "flag_outliers": 72,
+                "clip_outliers": 73,
+                "cap_outliers": 74,
+                "deduplicate": 80,
+                "validate_referential_integrity_or_stage": 90
+            }
+        
+            def get_step_priority(st):
+                act = str(st.get("action") or "").strip().lower()
+                return priority.get(act, 99)
+            
+            steps = sorted(filtered_steps, key=get_step_priority)
+            for idx, st in enumerate(steps):
+                st_copy = dict(st)
+                st_copy["order"] = idx + 1
+                steps[idx] = st_copy
+
+            never_drop = bool(business_rules.get("never_drop_rows"))
+            non_nullable_cols = business_rules.get("non_nullable") or []
+            local_excluded_columns = set(excluded_columns)
+            skipped_comments = []
+            for st in (block.get("steps") or []):
+                if st.get("action") in ("exclude_column", "drop_column") and st.get("column"):
+                    col_name = st.get("column")
+                    local_excluded_columns.add(col_name)
+                    skipped_comments.append(f"-- Column {col_name} skipped via exclude_column transform step")
+        
+            # Meta extraction for keys, indexing and incremental loading
+            cols = []
+            pk_col = None
+            watermark_col = None
+            if assessment and "datasets" in assessment:
+                ds_info = assessment["datasets"].get(ds_name) or {}
+                cols_info = ds_info.get("columns") or {}
+                cols = [c for c in cols_info.keys() if c not in local_excluded_columns]
+                for col_name, cmeta in cols_info.items():
+                    if cmeta.get("candidate_primary_key") and not pk_col:
+                        pk_col = col_name
+            
+                # Prioritized watermark selection
                 for col_name in cols_info.keys():
                     col_lower = col_name.lower()
-                    if "date" in col_lower or "time" in col_lower or "stamp" in col_lower:
-                        watermark_col = col_name
+                    if any(x in col_lower for x in ("modified", "update", "changed")) or col_lower.endswith("_at"):
+                        if "date" in col_lower or "time" in col_lower or "stamp" in col_lower or col_lower.endswith("_at"):
+                            watermark_col = col_name
+                            break
+                if not watermark_col:
+                    for col_name in cols_info.keys():
+                        col_lower = col_name.lower()
+                        if "date" in col_lower or "time" in col_lower or "stamp" in col_lower:
+                            watermark_col = col_name
+                            break
+        
+            # Fallback key search
+            if cols and not pk_col:
+                for c in cols:
+                    if c.lower().endswith("id") or c.lower().endswith("key"):
+                        pk_col = c
                         break
+                if not pk_col:
+                    pk_col = cols[0]
+                
+            if not pk_col and scd_type in ("type1", "type2"):
+                scd_type = "append"
+                
+            col_list = ", ".join(f"[{c}]" for c in cols) if cols else "*"
         
-        # Fallback key search
-        if cols and not pk_col:
-            for c in cols:
-                if c.lower().endswith("id") or c.lower().endswith("key"):
-                    pk_col = c
-                    break
-            if not pk_col:
-                pk_col = cols[0]
-                
-        col_list = ", ".join(f"[{c}]" for c in cols) if cols else "*"
+            lines.append(f"-- === dataset: {ds_name} === ")
         
-        lines.append(f"-- === dataset: {ds_name} === ")
-        
-        # Stored Procedure boundary setup for T-SQL
-        proc_lines: List[str] = []
-        proc_lines.extend(skipped_comments)
-        if dialect == "tsql":
-            lines.append(f"IF OBJECT_ID('dbo.etl_clean_{tbl_base}', 'P') IS NOT NULL DROP PROCEDURE dbo.etl_clean_{tbl_base};")
-            lines.append("GO")
-            lines.append(f"CREATE PROCEDURE dbo.etl_clean_{tbl_base}")
-            lines.append("    @load_type VARCHAR(20) = 'FULL',")
-            lines.append("    @last_run DATETIME = NULL")
-            lines.append("AS BEGIN")
-            lines.append("    SET NOCOUNT ON;")
-            lines.append("    -- Retrieve last run watermark if not provided")
-            lines.append("    IF @load_type = 'INCREMENTAL' AND @last_run IS NULL")
-            lines.append("    BEGIN")
-            lines.append(f"        SELECT @last_run = last_run_time FROM dbo.etl_watermark WHERE process_name = 'etl_clean_{tbl_base}';")
-            lines.append("    END;")
-            lines.append("")
-            lines.append(f"    INSERT INTO dbo.etl_log (process_name, start_time, status)")
-            lines.append(f"    VALUES ('etl_clean_{tbl_base}', GETDATE(), 'RUNNING');")
-            lines.append("    DECLARE @run_id INT = SCOPE_IDENTITY();")
-            lines.append("")
-            lines.append("    BEGIN TRY")
-            lines.append("        BEGIN TRAN;")
-            lines.append("")
-            
-        # Check if row-level deduplication step exists
-        has_row_dedup = any(
-            str(st.get("action") or "").lower() == "deduplicate" and str(st.get("column") or "").lower() in ("row-level", "[row-level]")
-            for st in steps
-        )
-
-        non_nullable_cols = business_rules.get("non_nullable") or []
-        if dialect == "tsql":
-            proc_lines.append(f"-- Initialize Clean Table Structure")
-            proc_lines.append(f"IF OBJECT_ID('{tbl_clean}', 'U') IS NULL")
-            proc_lines.append("BEGIN")
-            
-            # Explicit CREATE TABLE
-            create_cols = []
-            for c in cols:
-                c_meta = cols_info.get(c) or {}
-                c_type = c_meta.get("dtype") or c_meta.get("target_dtype") or ""
-                target_type = get_sql_cast_type(c_type, c)
-                
-                # Check nullability
-                if c == pk_col or c in non_nullable_cols:
-                    null_str = "NOT NULL"
-                else:
-                    null_str = "NULL"
-                create_cols.append(f"        [{c}] {target_type} {null_str}")
-            
-            # Add metadata columns
-            create_cols.append("        etl_created_at DATETIME DEFAULT GETDATE()")
-            create_cols.append("        etl_updated_at DATETIME DEFAULT GETDATE()")
-            create_cols.append("        etl_batch_id INT NULL")
-            
-            # Add primary key constraint inline if pk_col exists
-            if pk_col:
-                create_cols.append(f"        CONSTRAINT [PK_{tbl_base}_Clean] PRIMARY KEY ([{pk_col}])")
-                
-            proc_lines.append(f"    CREATE TABLE {clean_tbl} (")
-            proc_lines.append(",\n".join(create_cols))
-            proc_lines.append("    );")
-            
-            # Setup index keys
-            index_keys = []
-            rel = plan.get("relationships") or {}
-            for j in rel.get("joins") or []:
-                if j.get("parent_dataset") == ds_name:
-                    index_keys.append(j.get("parent_key"))
-                elif j.get("child_dataset") == ds_name:
-                    index_keys.append(j.get("child_key"))
-            if watermark_col:
-                index_keys.append(watermark_col)
-                
-            for ik in sorted(list(set(index_keys))):
-                proc_lines.append(f"    CREATE NONCLUSTERED INDEX idx_{tbl_base}_Clean_{ik} ON {clean_tbl}([{ik}]);")
-            proc_lines.append("END")
-            proc_lines.append("")
-            
-        # DDL alterations (run before staging setup)
-        ddl_lines = []
-        for st in steps:
-            col = st.get("column")
-            action = str(st.get("action") or "")
-            if not col or col in excluded_columns:
-                continue
-            col_clean = str(col).replace("'", "''")
-            if action in ("flag_outliers", "clip_or_flag"):
-                ddl_lines.append(f"IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('{tbl_clean}') AND name = '{col_clean}_outlier_flagged')")
-                ddl_lines.append(f"    ALTER TABLE {clean_tbl} ADD [{col_clean}_outlier_flagged] BIT NOT NULL DEFAULT 0;")
-            elif action == "cast_type":
-                ddl_lines.append(f"IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('{tbl_clean}') AND name = '{col_clean}_int')")
-                ddl_lines.append(f"    ALTER TABLE {clean_tbl} ADD [{col_clean}_int] BIGINT;")
-                
-        if ddl_lines:
+            # Stored Procedure boundary setup for T-SQL
+            proc_lines: List[str] = []
+            proc_lines.extend(skipped_comments)
             if dialect == "tsql":
-                proc_lines.append("-- Add generated transformation columns to Clean Table")
-                proc_lines.extend(ddl_lines)
+                lines.append(f"IF OBJECT_ID('dbo.{sp_name}', 'P') IS NOT NULL DROP PROCEDURE dbo.{sp_name};")
+                lines.append("GO")
+                lines.append(f"CREATE PROCEDURE dbo.{sp_name}")
+                lines.append("    @load_type VARCHAR(20) = 'FULL',")
+                lines.append("    @last_run DATETIME = NULL")
+                lines.append("AS BEGIN")
+                lines.append("    SET NOCOUNT ON;")
+                lines.append("    -- Retrieve last run watermark if not provided")
+                lines.append("    IF @load_type = 'INCREMENTAL' AND @last_run IS NULL")
+                lines.append("    BEGIN")
+                lines.append(f"        SELECT @last_run = last_run_time FROM dbo.etl_watermark WHERE process_name = '{sp_name}';")
+                lines.append("    END;")
+                lines.append("")
+                lines.append(f"    INSERT INTO dbo.etl_log (process_name, start_time, status)")
+                lines.append(f"    VALUES ('{sp_name}', GETDATE(), 'RUNNING');")
+                lines.append("    DECLARE @run_id INT = SCOPE_IDENTITY();")
+                lines.append("")
+                lines.append("    BEGIN TRY")
+                
+                # S3-02: Preflight check warnings
+                for col in cols:
+                    col_brk = _brk(col)
+                    col_safe = re.sub(r'[^a-zA-Z0-9_]', '_', col)
+                    if col in non_nullable_cols:
+                        lines.append(f"        DECLARE @null_count_{col_safe} INT = (SELECT COUNT(*) FROM {src_tbl_expr} WHERE {col_brk} IS NULL);")
+                        lines.append(f"        IF @null_count_{col_safe} > 0")
+                        lines.append(f"        BEGIN")
+                        lines.append(f"            INSERT INTO dbo.etl_log (process_name, start_time, end_time, status, error_message)")
+                        lines.append(f"            VALUES ('{sp_name}', GETDATE(), GETDATE(), 'WARNING', 'Preflight check: column {col_brk} has ' + CAST(@null_count_{col_safe} AS VARCHAR(10)) + ' NULL values in source.');")
+                        lines.append(f"        END;")
+                    
+                    allowed_list = valid_values.get(col) or valid_values.get(col.lower())
+                    if allowed_list:
+                        sql_list = ", ".join(f"N'{str(val).replace("'", "''")}'" for val in allowed_list)
+                        lines.append(f"        DECLARE @invalid_count_{col_safe} INT = (SELECT COUNT(*) FROM {src_tbl_expr} WHERE {col_brk} IS NOT NULL AND {col_brk} NOT IN ({sql_list}));")
+                        lines.append(f"        IF @invalid_count_{col_safe} > 0")
+                        lines.append(f"        BEGIN")
+                        lines.append(f"            INSERT INTO dbo.etl_log (process_name, start_time, end_time, status, error_message)")
+                        lines.append(f"            VALUES ('{sp_name}', GETDATE(), GETDATE(), 'WARNING', 'Preflight check: column {col_brk} has ' + CAST(@invalid_count_{col_safe} AS VARCHAR(10)) + ' invalid values not in allowed list.');")
+                        lines.append(f"        END;")
+                        
+                lines.append("        BEGIN TRAN;")
+                lines.append("")
+            
+            # Check if row-level deduplication step exists
+            has_row_dedup = any(
+                str(st.get("action") or "").lower() == "deduplicate" and str(st.get("column") or "").lower() in ("row-level", "[row-level]")
+                for st in steps
+            )
+
+            if dialect == "tsql":
+                proc_lines.append(f"-- Initialize Clean Table Structure")
+                proc_lines.append(f"IF OBJECT_ID('{tbl_clean}', 'U') IS NULL")
+                proc_lines.append("BEGIN")
+            
+                # Explicit CREATE TABLE
+                create_cols = []
+                for c in cols:
+                    c_meta = cols_info.get(c) or {}
+                    c_type = c_meta.get("dtype") or c_meta.get("target_dtype") or ""
+                    target_type = get_sql_cast_type(c_type, c)
+                
+                    # Check nullability
+                    if c == pk_col or c in non_nullable_cols:
+                        null_str = "NOT NULL"
+                    else:
+                        null_str = "NULL"
+                    create_cols.append(f"        [{c}] {target_type} {null_str}")
+            
+                # Add metadata columns
+                create_cols.append("        etl_created_at DATETIME DEFAULT GETDATE()")
+                create_cols.append("        etl_updated_at DATETIME DEFAULT GETDATE()")
+                create_cols.append("        etl_batch_id INT NULL")
+                
+                # Add SCD Type 2 columns if applicable
+                if scd_type == "type2":
+                    create_cols.append("        start_date DATETIME DEFAULT GETDATE()")
+                    create_cols.append("        end_date DATETIME DEFAULT '9999-12-31'")
+                    create_cols.append("        is_current BIT DEFAULT 1")
+            
+                # Add primary key constraint inline if pk_col exists
+                if pk_col:
+                    if scd_type == "type2":
+                        create_cols.append(f"        CONSTRAINT [PK_{tbl_base}_Clean] PRIMARY KEY ([{pk_col}], start_date)")
+                    else:
+                        create_cols.append(f"        CONSTRAINT [PK_{tbl_base}_Clean] PRIMARY KEY ([{pk_col}])")
+                
+                proc_lines.append(f"    CREATE TABLE {clean_tbl} (")
+                proc_lines.append(",\n".join(create_cols))
+                proc_lines.append("    );")
+            
+                # Setup index keys
+                index_keys = []
+                rel = plan.get("relationships") or {}
+                for j in rel.get("joins") or []:
+                    if j.get("parent_dataset") == ds_name:
+                        index_keys.append(j.get("parent_key"))
+                    elif j.get("child_dataset") == ds_name:
+                        index_keys.append(j.get("child_key"))
+                if watermark_col:
+                    index_keys.append(watermark_col)
+                
+                for ik in sorted(list(set(index_keys))):
+                    proc_lines.append(f"    CREATE NONCLUSTERED INDEX idx_{tbl_base}_Clean_{ik} ON {clean_tbl}([{ik}]);")
+                proc_lines.append("END")
+                proc_lines.append("")
+            
+            # DDL alterations (run before staging setup)
+            ddl_lines = []
+            for st in steps:
+                col = st.get("column")
+                action = str(st.get("action") or "")
+                if not col or col in excluded_columns:
+                    continue
+                col_clean = str(col).replace("'", "''")
+                if action in ("flag_outliers", "clip_or_flag"):
+                    ddl_lines.append(f"IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('{tbl_clean}') AND name = '{col_clean}_outlier_flagged')")
+                    ddl_lines.append(f"    ALTER TABLE {clean_tbl} ADD [{col_clean}_outlier_flagged] BIT NOT NULL DEFAULT 0;")
+                elif action == "cast_type":
+                    ddl_lines.append(f"IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('{tbl_clean}') AND name = '{col_clean}_int')")
+                    ddl_lines.append(f"    ALTER TABLE {clean_tbl} ADD [{col_clean}_int] BIGINT;")
+                
+            if ddl_lines:
+                if dialect == "tsql":
+                    proc_lines.append("-- Add generated transformation columns to Clean Table")
+                    proc_lines.extend(ddl_lines)
+                    proc_lines.append("")
+                else:
+                    lines.extend(ddl_lines)
+                    lines.append("")
+
+            if dialect == "tsql":
+                proc_lines.append(f"-- Create Staging Table with raw column types to preserve raw strings")
+                proc_lines.append(f"IF OBJECT_ID('tempdb..{tbl_staging}') IS NOT NULL DROP TABLE {tbl_staging};")
+                staging_cols_ddl = []
+                for col_name in cols:
+                    staging_cols_ddl.append(f"[{col_name}] NVARCHAR(MAX) NULL")
+                staging_cols_ddl.append("etl_batch_id INT NULL")
+                for st in steps:
+                    if st.get("action") in ("flag_outliers", "clip_or_flag") and st.get("column") and st.get("column") not in excluded_columns:
+                        staging_cols_ddl.append(f"[{st.get('column')}_outlier_flagged] INT NULL")
+                    if st.get("action") == "cast_type" and st.get("column") and st.get("column") not in excluded_columns:
+                        staging_cols_ddl.append(f"[{st.get('column')}_int] BIGINT NULL")
+                ddl_joined = ", ".join(staging_cols_ddl)
+                proc_lines.append(f"CREATE TABLE {tbl_staging} ({ddl_joined});")
+                proc_lines.append("")
+
+            # Data copy logic
+            if dialect == "tsql":
+                proc_lines.append("-- Copy data from Raw to Staging")
+            
+                def get_copy_sql_lines(where_cond: str = "") -> List[str]:
+                    where_clause = f" WHERE {where_cond}" if where_cond else ""
+                    col_target_list = f" ({col_list}, etl_batch_id)" if col_list != "*" else ""
+                    select_list = f"{col_list}, @run_id" if col_list != "*" else "*, @run_id"
+                    return [
+                        f"    INSERT INTO {tbl_staging}{col_target_list}",
+                        f"    SELECT {select_list} FROM {raw_tbl}{where_clause};"
+                    ]
+
+                if watermark_col:
+                    parsed_watermark = (
+                        f"COALESCE("
+                        f"TRY_CONVERT(datetime, [{watermark_col}], 120), "
+                        f"TRY_CONVERT(datetime, [{watermark_col}], 103), "
+                        f"TRY_CONVERT(datetime, [{watermark_col}], 101), "
+                        f"TRY_CONVERT(datetime, [{watermark_col}], 111)"
+                        f")"
+                    )
+                    proc_lines.append("IF @load_type = 'FULL' OR @last_run IS NULL")
+                    proc_lines.append("BEGIN")
+                    proc_lines.extend(get_copy_sql_lines())
+                    proc_lines.append("END")
+                    proc_lines.append("ELSE")
+                    proc_lines.append("BEGIN")
+                    proc_lines.extend(get_copy_sql_lines(f"{parsed_watermark} > @last_run"))
+                    proc_lines.append("END")
+                else:
+                    proc_lines.extend(get_copy_sql_lines())
                 proc_lines.append("")
             else:
-                lines.extend(ddl_lines)
+                lines.append(f"-- ANSI Init Target: CREATE TABLE {tbl_staging} AS SELECT * FROM {raw_tbl};")
                 lines.append("")
-
-        if dialect == "tsql":
-            proc_lines.append(f"-- Create Staging Table with raw column types to preserve raw strings")
-            proc_lines.append(f"IF OBJECT_ID('tempdb..{tbl_staging}') IS NOT NULL DROP TABLE {tbl_staging};")
-            staging_cols_ddl = []
-            for col_name in cols:
-                staging_cols_ddl.append(f"[{col_name}] NVARCHAR(MAX) NULL")
-            staging_cols_ddl.append("etl_batch_id INT NULL")
-            for st in steps:
-                if st.get("action") in ("flag_outliers", "clip_or_flag") and st.get("column") and st.get("column") not in excluded_columns:
-                    staging_cols_ddl.append(f"[{st.get('column')}_outlier_flagged] INT NULL")
-                if st.get("action") == "cast_type" and st.get("column") and st.get("column") not in excluded_columns:
-                    staging_cols_ddl.append(f"[{st.get('column')}_int] BIGINT NULL")
-            ddl_joined = ", ".join(staging_cols_ddl)
-            proc_lines.append(f"CREATE TABLE {tbl_staging} ({ddl_joined});")
-            proc_lines.append("")
-
-        # Data copy logic
-        if dialect == "tsql":
-            proc_lines.append("-- Copy data from Raw to Staging")
-            
-            def get_copy_sql_lines(where_cond: str = "") -> List[str]:
-                where_clause = f" WHERE {where_cond}" if where_cond else ""
-                col_target_list = f" ({col_list}, etl_batch_id)" if col_list != "*" else ""
-                select_list = f"{col_list}, @run_id" if col_list != "*" else "*, @run_id"
-                return [
-                    f"    INSERT INTO {tbl_staging}{col_target_list}",
-                    f"    SELECT {select_list} FROM {raw_tbl}{where_clause};"
-                ]
-
-            if watermark_col:
-                parsed_watermark = (
-                    f"COALESCE("
-                    f"TRY_CONVERT(datetime, [{watermark_col}], 120), "
-                    f"TRY_CONVERT(datetime, [{watermark_col}], 103), "
-                    f"TRY_CONVERT(datetime, [{watermark_col}], 101), "
-                    f"TRY_CONVERT(datetime, [{watermark_col}], 111)"
-                    f")"
-                )
-                proc_lines.append("IF @load_type = 'FULL' OR @last_run IS NULL")
-                proc_lines.append("BEGIN")
-                proc_lines.extend(get_copy_sql_lines())
-                proc_lines.append("END")
-                proc_lines.append("ELSE")
-                proc_lines.append("BEGIN")
-                proc_lines.extend(get_copy_sql_lines(f"{parsed_watermark} > @last_run"))
-                proc_lines.append("END")
-            else:
-                proc_lines.extend(get_copy_sql_lines())
-            proc_lines.append("")
-        else:
-            lines.append(f"-- ANSI Init Target: CREATE TABLE {tbl_staging} AS SELECT * FROM {raw_tbl};")
-            lines.append("")
         
-        step_lines = []
+            step_lines = []
         
-        # Step 0: Normalize empty strings to NULL before validation
-        if dialect == "tsql" and cols:
-            nullify_clauses = [f"[{c}] = NULLIF(LTRIM(RTRIM([{c}])), '')" for c in cols]
-            step_lines.append(f"-- Normalize empty strings to NULL before validation")
-            step_lines.append(f"UPDATE {tbl_staging}")
-            step_lines.append(f"SET " + ",\n    ".join(nullify_clauses) + ";")
-            step_lines.append(f"")
+            # Step 0: Normalize empty strings to NULL before validation
+            if dialect == "tsql" and cols:
+                nullify_clauses = [f"[{c}] = NULLIF(LTRIM(RTRIM([{c}])), '')" for c in cols]
+                step_lines.append(f"-- Normalize empty strings to NULL before validation")
+                step_lines.append(f"UPDATE {tbl_staging}")
+                step_lines.append(f"SET " + ",\n    ".join(nullify_clauses) + ";")
+                step_lines.append(f"")
 
-        # Phase 1: Validations and Quarantines (deletes/rejects) on the Staging Table
-        if pk_col and dialect == "tsql" and not never_drop:
-            step_lines.append(f"-- Quarantine rows where primary key [{pk_col}] is NULL to dbo.etl_rejects")
-            step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-            step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
-            step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-            step_lines.append(f"       'Primary key [{pk_col}] is NULL'")
-            step_lines.append(f"FROM {tbl_staging} r")
-            step_lines.append(f"WHERE r.[{pk_col}] IS NULL;")
-            step_lines.append(f"")
-            step_lines.append(f"DELETE FROM {tbl_staging} WHERE [{pk_col}] IS NULL;")
-            step_lines.append(f"")
+            # Phase 1: Validations and Quarantines (deletes/rejects) on the Staging Table
+            if is_clean and pk_col and dialect == "tsql" and not never_drop:
+                step_lines.append(f"-- Quarantine rows where primary key [{pk_col}] is NULL to dbo.etl_rejects")
+                step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
+                step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                step_lines.append(f"       'Primary key [{pk_col}] is NULL'")
+                step_lines.append(f"FROM {tbl_staging} r")
+                step_lines.append(f"WHERE r.[{pk_col}] IS NULL;")
+                step_lines.append(f"")
+                step_lines.append(f"DELETE FROM {tbl_staging} WHERE [{pk_col}] IS NULL;")
+                step_lines.append(f"")
 
-        # Reject non-numeric IDs and decimals/floats
-        if dialect == "tsql":
-            for c_name in cols:
-                c_meta = cols_info.get(c_name) or {}
-                c_type = c_meta.get("dtype") or c_meta.get("target_dtype") or ""
-                sql_t = get_sql_cast_type(c_type, c_name)
-                c_brk = _brk(c_name)
+            # Reject non-numeric IDs and decimals/floats
+            if dialect == "tsql":
+                for c_name in cols:
+                    c_meta = cols_info.get(c_name) or {}
+                    c_type = c_meta.get("dtype") or c_meta.get("target_dtype") or ""
+                    sql_t = get_sql_cast_type(c_type, c_name)
+                    c_brk = _brk(c_name)
                 
-                # Check for BIGINT IDs
-                if sql_t == "BIGINT" and (c_name.lower().endswith("id") or c_name.lower().endswith("key")):
-                    if not never_drop:
-                        step_lines.append(f"-- Quarantine rows where ID column [{c_name}] is not numeric to dbo.etl_rejects")
-                        step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-                        step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
-                        step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-                        step_lines.append(f"       '{c_name} is not numeric'")
-                        step_lines.append(f"FROM {tbl_staging} r")
-                        step_lines.append(f"WHERE r.{c_brk} IS NOT NULL AND TRY_CAST(r.{c_brk} AS BIGINT) IS NULL;")
-                        step_lines.append(f"")
-                        step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c_brk} IS NOT NULL AND TRY_CAST({c_brk} AS BIGINT) IS NULL;")
-                        step_lines.append(f"")
-                    else:
-                        step_lines.append(f"-- Nullify invalid non-numeric ID values for [{c_name}]")
-                        step_lines.append(f"UPDATE {tbl_staging} SET {c_brk} = NULL WHERE {c_brk} IS NOT NULL AND TRY_CAST({c_brk} AS BIGINT) IS NULL;")
-                        step_lines.append(f"")
-                
-                # Check for decimals/floats (e.g. OrderAmount)
-                elif sql_t.startswith("DECIMAL") or sql_t in ("FLOAT", "REAL"):
-                    if not never_drop:
-                        step_lines.append(f"-- Quarantine rows where numeric column [{c_name}] is not numeric to dbo.etl_rejects")
-                        step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-                        step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
-                        step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-                        step_lines.append(f"       '{c_name} is not numeric'")
-                        step_lines.append(f"FROM {tbl_staging} r")
-                        step_lines.append(f"WHERE r.{c_brk} IS NOT NULL AND TRY_CAST(r.{c_brk} AS {sql_t}) IS NULL;")
-                        step_lines.append(f"")
-                        step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c_brk} IS NOT NULL AND TRY_CAST({c_brk} AS {sql_t}) IS NULL;")
-                        step_lines.append(f"")
-                    else:
-                        step_lines.append(f"-- Nullify invalid non-numeric values for [{c_name}]")
-                        step_lines.append(f"UPDATE {tbl_staging} SET {c_brk} = NULL WHERE {c_brk} IS NOT NULL AND TRY_CAST({c_brk} AS {sql_t}) IS NULL;")
-                        step_lines.append(f"")
-            
-        non_nullable_cols = business_rules.get("non_nullable") or []
-        for nn_col in non_nullable_cols:
-            if nn_col in cols and nn_col != pk_col:
-                nn_c = _brk(nn_col)
-                if not never_drop:
-                    step_lines.append(f"-- Quarantine rows where non-nullable [{nn_col}] is NULL to dbo.etl_rejects")
-                    step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-                    step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
-                    step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-                    step_lines.append(f"       'Required column [{nn_col}] is NULL'")
-                    step_lines.append(f"FROM {tbl_staging} r")
-                    step_lines.append(f"WHERE r.{nn_c} IS NULL;")
-                    step_lines.append(f"")
-                    step_lines.append(f"DELETE FROM {tbl_staging} WHERE {nn_c} IS NULL;")
-                    step_lines.append(f"")
-                    
-        for st in steps:
-            col = st.get("column")
-            action = str(st.get("action") or "")
-            if not col or col in local_excluded_columns:
-                continue
-            c = _brk(col)
-            
-            if action == "parse_dates":
-                if dialect == "tsql":
-                    if not never_drop:
-                        # 1. Reject NULL dates if it is a high-severity DQ issue (Option A)
-                        has_high_null = False
-                        if assessment:
-                            dq_issues = assessment.get("data_quality_issues", {}).get("datasets", {}).get(ds_name, {}).get("issues", [])
-                            has_high_null = any(
-                                str(iss.get("column")).lower() == str(col).lower()
-                                and str(iss.get("type")).lower() == "nulls"
-                                and str(iss.get("severity")).lower() == "high"
-                                for iss in dq_issues
-                            )
-                        
-                        if has_high_null:
-                            step_lines.append(f"-- Quarantine null dates from {tbl_staging}.{c} to dbo.etl_rejects")
-                            step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-                            step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
-                            step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-                            step_lines.append(f"       'Required date column [{col}] is NULL'")
-                            step_lines.append(f"FROM {tbl_staging} r")
-                            step_lines.append(f"WHERE r.{c} IS NULL;")
-                            step_lines.append(f"")
-                            step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c} IS NULL;")
-                            step_lines.append(f"")
-
-                        # 2. Reject invalid format dates
-                        step_lines.append(f"-- Quarantine invalid dates from {tbl_staging}.{c} to dbo.etl_rejects")
-                        step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-                        step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
-                        step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-                        step_lines.append(f"       'Column [{col}] with value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' is not a valid date format'")
-                        step_lines.append(f"FROM {tbl_staging} r")
-                        step_lines.append(f"WHERE r.{c} IS NOT NULL AND COALESCE(")
-                        step_lines.append(f"    TRY_CONVERT(date, r.{c}, 120),")
-                        step_lines.append(f"    TRY_CONVERT(date, r.{c}, 103),")
-                        step_lines.append(f"    TRY_CONVERT(date, r.{c}, 101),")
-                        step_lines.append(f"    TRY_CONVERT(date, r.{c}, 111)")
-                        step_lines.append(f") IS NULL;")
-                        step_lines.append(f"")
-                        step_lines.append(f"DELETE FROM {tbl_staging}")
-                        step_lines.append(f"WHERE {c} IS NOT NULL AND COALESCE(")
-                        step_lines.append(f"    TRY_CONVERT(date, {c}, 120),")
-                        step_lines.append(f"    TRY_CONVERT(date, {c}, 103),")
-                        step_lines.append(f"    TRY_CONVERT(date, {c}, 101),")
-                        step_lines.append(f"    TRY_CONVERT(date, {c}, 111)")
-                        step_lines.append(f") IS NULL;")
-                        step_lines.append(f"")
-            elif action == "sanitize_email":
-                if dialect == "tsql":
-                    is_required = col in non_nullable_cols
-                    if not never_drop and is_required:
-                        step_lines.append(f"-- Quarantine invalid emails from {tbl_staging}.{c} to dbo.etl_rejects")
-                        step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-                        step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
-                        step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-                        step_lines.append(f"       'Column [{col}] with value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' is not a valid email format'")
-                        step_lines.append(f"FROM {tbl_staging} r")
-                        step_lines.append(f"WHERE r.{c} IS NOT NULL AND NOT (CAST(r.{c} AS NVARCHAR(MAX)) LIKE '%_@_%._%');")
-                        step_lines.append(f"")
-                        step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c} IS NOT NULL AND NOT (CAST({c} AS NVARCHAR(MAX)) LIKE '%_@_%._%');")
-                        step_lines.append(f"")
-                    else:
-                        step_lines.append(f"-- Nullify invalid email format for optional column [{col}]")
-                        step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND NOT (CAST({c} AS NVARCHAR(MAX)) LIKE '%_@_%._%');")
-                        step_lines.append(f"")
-            elif action == "normalize_phone":
-                if dialect == "tsql":
-                    cleaned_expr = f"REPLACE(REPLACE(REPLACE(REPLACE(CAST(r.{c} AS NVARCHAR(200)), N'-', N''), N' ', N''), N'(', N''), N')', N'')"
-                    cleaned_expr_del = f"REPLACE(REPLACE(REPLACE(REPLACE(CAST({c} AS NVARCHAR(200)), N'-', N''), N' ', N''), N'(', N''), N')', N'')"
-                    is_required = col in non_nullable_cols
-                    if not never_drop and is_required:
-                        step_lines.append(f"-- Quarantine invalid phones from {tbl_staging}.{c} to dbo.etl_rejects")
-                        step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-                        step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
-                        step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-                        step_lines.append(f"       'Column [{col}] with value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' is not a valid phone format'")
-                        step_lines.append(f"FROM {tbl_staging} r")
-                        step_lines.append(f"WHERE r.{c} IS NOT NULL AND (LEN({cleaned_expr}) < 7 OR {cleaned_expr} LIKE '%[^0-9]%');")
-                        step_lines.append(f"")
-                        step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c} IS NOT NULL AND (LEN({cleaned_expr_del}) < 7 OR {cleaned_expr_del} LIKE '%[^0-9]%');")
-                        step_lines.append(f"")
-                    else:
-                        step_lines.append(f"-- Nullify invalid phone format for optional column [{col}]")
-                        step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND (LEN({cleaned_expr_del}) < 7 OR {cleaned_expr_del} LIKE '%[^0-9]%');")
-                        step_lines.append(f"")
-            elif action == "at_least_one":
-                cols_split = [str(x).strip() for x in str(col).split(",")]
-                cols_brackets = [_brk(x) for x in cols_split]
-                all_null_cond = " AND ".join(f"r.{cb} IS NULL" for cb in cols_brackets)
-                all_null_cond_delete = " AND ".join(f"{cb} IS NULL" for cb in cols_brackets)
-                if dialect == "tsql":
-                    if not never_drop:
-                        step_lines.append(f"-- Quarantine rows where all of {col} are NULL to dbo.etl_rejects")
-                        step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-                        step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
-                        step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-                        step_lines.append(f"       'All of columns [{col}] are NULL'")
-                        step_lines.append(f"FROM {tbl_staging} r")
-                        step_lines.append(f"WHERE {all_null_cond};")
-                        step_lines.append(f"")
-                        step_lines.append(f"DELETE FROM {tbl_staging} WHERE {all_null_cond_delete};")
-                        step_lines.append(f"")
-            elif action == "validate_referential_integrity_or_stage":
-                p = step_params(st)
-                rel_ds = p.get("related_dataset") or "?"
-                rel_col = p.get("related_column") or "?"
-                fk_action = p.get("fk_action") or "flag"
-                parent_tbl = _get_clean_table_name(rel_ds)
-                
-                if dialect == "tsql":
-                    step_lines.append(f"-- Referential integrity check: {col} -> {rel_ds}.{rel_col} (action={fk_action})")
-                    if fk_action == "reject_orphans":
+                    # Check for BIGINT IDs
+                    if sql_t == "BIGINT" and (c_name.lower().endswith("id") or c_name.lower().endswith("key")):
                         if not never_drop:
+                            step_lines.append(f"-- Quarantine rows where ID column [{c_name}] is not numeric to dbo.etl_rejects")
                             step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
-                            step_lines.append(f"SELECT 'etl_clean_{tbl_base}', '{tbl_clean}',")
+                            step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
                             step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
-                            step_lines.append(f"       'Referential integrity violation: [{col}] value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' does not exist in {parent_tbl}.[{rel_col}]'")
+                            step_lines.append(f"       '{c_name} is not numeric'")
+                            step_lines.append(f"FROM {tbl_staging} r")
+                            step_lines.append(f"WHERE r.{c_brk} IS NOT NULL AND TRY_CAST(r.{c_brk} AS BIGINT) IS NULL;")
+                            step_lines.append(f"")
+                            step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c_brk} IS NOT NULL AND TRY_CAST({c_brk} AS BIGINT) IS NULL;")
+                            step_lines.append(f"")
+                        else:
+                            step_lines.append(f"-- Nullify invalid non-numeric ID values for [{c_name}]")
+                            step_lines.append(f"UPDATE {tbl_staging} SET {c_brk} = NULL WHERE {c_brk} IS NOT NULL AND TRY_CAST({c_brk} AS BIGINT) IS NULL;")
+                            step_lines.append(f"")
+                
+                    # Check for decimals/floats (e.g. OrderAmount)
+                    elif sql_t.startswith("DECIMAL") or sql_t in ("FLOAT", "REAL"):
+                        if not never_drop:
+                            step_lines.append(f"-- Quarantine rows where numeric column [{c_name}] is not numeric to dbo.etl_rejects")
+                            step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                            step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
+                            step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                            step_lines.append(f"       '{c_name} is not numeric'")
+                            step_lines.append(f"FROM {tbl_staging} r")
+                            step_lines.append(f"WHERE r.{c_brk} IS NOT NULL AND TRY_CAST(r.{c_brk} AS {sql_t}) IS NULL;")
+                            step_lines.append(f"")
+                            step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c_brk} IS NOT NULL AND TRY_CAST({c_brk} AS {sql_t}) IS NULL;")
+                            step_lines.append(f"")
+                        else:
+                            step_lines.append(f"-- Nullify invalid non-numeric values for [{c_name}]")
+                            step_lines.append(f"UPDATE {tbl_staging} SET {c_brk} = NULL WHERE {c_brk} IS NOT NULL AND TRY_CAST({c_brk} AS {sql_t}) IS NULL;")
+                            step_lines.append(f"")
+            
+            if is_clean:
+                for nn_col in non_nullable_cols:
+                    if nn_col in cols and nn_col != pk_col:
+                        nn_c = _brk(nn_col)
+                        if not never_drop:
+                            step_lines.append(f"-- Quarantine rows where non-nullable [{nn_col}] is NULL to dbo.etl_rejects")
+                            step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                            step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
+                            step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                            step_lines.append(f"       'Required column [{nn_col}] is NULL'")
+                            step_lines.append(f"FROM {tbl_staging} r")
+                            step_lines.append(f"WHERE r.{nn_c} IS NULL;")
+                            step_lines.append(f"")
+                            step_lines.append(f"DELETE FROM {tbl_staging} WHERE {nn_c} IS NULL;")
+                            step_lines.append(f"")
+                    
+            for st in steps:
+                col = st.get("column")
+                action = str(st.get("action") or "")
+                if not col or col in local_excluded_columns:
+                    continue
+                c = _brk(col)
+            
+                if action == "parse_dates":
+                    if dialect == "tsql":
+                        if not never_drop:
+                            # 1. Reject NULL dates if it is a high-severity DQ issue (Option A)
+                            has_high_null = False
+                            if assessment:
+                                dq_issues = assessment.get("data_quality_issues", {}).get("datasets", {}).get(ds_name, {}).get("issues", [])
+                                has_high_null = any(
+                                    str(iss.get("column")).lower() == str(col).lower()
+                                    and str(iss.get("type")).lower() == "nulls"
+                                    and str(iss.get("severity")).lower() == "high"
+                                    for iss in dq_issues
+                                )
+                        
+                            if has_high_null:
+                                step_lines.append(f"-- Quarantine null dates from {tbl_staging}.{c} to dbo.etl_rejects")
+                                step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                                step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
+                                step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                                step_lines.append(f"       'Required date column [{col}] is NULL'")
+                                step_lines.append(f"FROM {tbl_staging} r")
+                                step_lines.append(f"WHERE r.{c} IS NULL;")
+                                step_lines.append(f"")
+                                step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c} IS NULL;")
+                                step_lines.append(f"")
+
+                            # 2. Reject invalid format dates
+                            step_lines.append(f"-- Quarantine invalid dates from {tbl_staging}.{c} to dbo.etl_rejects")
+                            step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                            step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
+                            step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                            step_lines.append(f"       'Column [{col}] with value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' is not a valid date format'")
+                            step_lines.append(f"FROM {tbl_staging} r")
+                            step_lines.append(f"WHERE r.{c} IS NOT NULL AND COALESCE(")
+                            step_lines.append(f"    TRY_CONVERT(date, r.{c}, 120),")
+                            step_lines.append(f"    TRY_CONVERT(date, r.{c}, 103),")
+                            step_lines.append(f"    TRY_CONVERT(date, r.{c}, 101),")
+                            step_lines.append(f"    TRY_CONVERT(date, r.{c}, 111)")
+                            step_lines.append(f") IS NULL;")
+                            step_lines.append(f"")
+                            step_lines.append(f"DELETE FROM {tbl_staging}")
+                            step_lines.append(f"WHERE {c} IS NOT NULL AND COALESCE(")
+                            step_lines.append(f"    TRY_CONVERT(date, {c}, 120),")
+                            step_lines.append(f"    TRY_CONVERT(date, {c}, 103),")
+                            step_lines.append(f"    TRY_CONVERT(date, {c}, 101),")
+                            step_lines.append(f"    TRY_CONVERT(date, {c}, 111)")
+                            step_lines.append(f") IS NULL;")
+                            step_lines.append(f"")
+                elif action == "sanitize_email":
+                    if dialect == "tsql":
+                        is_required = col in non_nullable_cols
+                        if not never_drop and is_required:
+                            step_lines.append(f"-- Quarantine invalid emails from {tbl_staging}.{c} to dbo.etl_rejects")
+                            step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                            step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
+                            step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                            step_lines.append(f"       'Column [{col}] with value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' is not a valid email format'")
+                            step_lines.append(f"FROM {tbl_staging} r")
+                            step_lines.append(f"WHERE r.{c} IS NOT NULL AND NOT (CAST(r.{c} AS NVARCHAR(MAX)) LIKE '%_@_%._%');")
+                            step_lines.append(f"")
+                            step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c} IS NOT NULL AND NOT (CAST({c} AS NVARCHAR(MAX)) LIKE '%_@_%._%');")
+                            step_lines.append(f"")
+                        else:
+                            step_lines.append(f"-- Nullify invalid email format for optional column [{col}]")
+                            step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND NOT (CAST({c} AS NVARCHAR(MAX)) LIKE '%_@_%._%');")
+                            step_lines.append(f"")
+                elif action == "normalize_phone":
+                    if dialect == "tsql":
+                        cleaned_expr = f"REPLACE(REPLACE(REPLACE(REPLACE(CAST(r.{c} AS NVARCHAR(200)), N'-', N''), N' ', N''), N'(', N''), N')', N'')"
+                        cleaned_expr_del = f"REPLACE(REPLACE(REPLACE(REPLACE(CAST({c} AS NVARCHAR(200)), N'-', N''), N' ', N''), N'(', N''), N')', N'')"
+                        is_required = col in non_nullable_cols
+                        if not never_drop and is_required:
+                            step_lines.append(f"-- Quarantine invalid phones from {tbl_staging}.{c} to dbo.etl_rejects")
+                            step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                            step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
+                            step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                            step_lines.append(f"       'Column [{col}] with value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' is not a valid phone format'")
+                            step_lines.append(f"FROM {tbl_staging} r")
+                            step_lines.append(f"WHERE r.{c} IS NOT NULL AND (LEN({cleaned_expr}) < 7 OR {cleaned_expr} LIKE '%[^0-9]%');")
+                            step_lines.append(f"")
+                            step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c} IS NOT NULL AND (LEN({cleaned_expr_del}) < 7 OR {cleaned_expr_del} LIKE '%[^0-9]%');")
+                            step_lines.append(f"")
+                        else:
+                            step_lines.append(f"-- Nullify invalid phone format for optional column [{col}]")
+                            step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND (LEN({cleaned_expr_del}) < 7 OR {cleaned_expr_del} LIKE '%[^0-9]%');")
+                            step_lines.append(f"")
+                elif action == "at_least_one":
+                    cols_split = [str(x).strip() for x in str(col).split(",")]
+                    cols_brackets = [_brk(x) for x in cols_split]
+                    all_null_cond = " AND ".join(f"r.{cb} IS NULL" for cb in cols_brackets)
+                    all_null_cond_delete = " AND ".join(f"{cb} IS NULL" for cb in cols_brackets)
+                    if dialect == "tsql":
+                        if not never_drop:
+                            step_lines.append(f"-- Quarantine rows where all of {col} are NULL to dbo.etl_rejects")
+                            step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                            step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
+                            step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                            step_lines.append(f"       'All of columns [{col}] are NULL'")
+                            step_lines.append(f"FROM {tbl_staging} r")
+                            step_lines.append(f"WHERE {all_null_cond};")
+                            step_lines.append(f"")
+                            step_lines.append(f"DELETE FROM {tbl_staging} WHERE {all_null_cond_delete};")
+                            step_lines.append(f"")
+                elif action == "validate_referential_integrity_or_stage":
+                    p = step_params(st)
+                    rel_ds = p.get("related_dataset") or "?"
+                    rel_col = p.get("related_column") or "?"
+                    fk_action = p.get("fk_action") or "flag"
+                    parent_tbl = _get_clean_table_name(rel_ds)
+                
+                    if dialect == "tsql":
+                        step_lines.append(f"-- Referential integrity check: {col} -> {rel_ds}.{rel_col} (action={fk_action})")
+                        if fk_action == "reject_orphans":
+                            if not never_drop:
+                                step_lines.append(f"INSERT INTO dbo.etl_rejects (process_name, table_name, row_data, error_reason)")
+                                step_lines.append(f"SELECT '{sp_name}', '{tbl_clean}',")
+                                step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
+                                step_lines.append(f"       'Referential integrity violation: [{col}] value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' does not exist in {parent_tbl}.[{rel_col}]'")
+                                step_lines.append(f"FROM {tbl_staging} r")
+                                step_lines.append(f"WHERE r.{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = r.{c});")
+                                step_lines.append(f"")
+                                step_lines.append(f"DELETE FROM {tbl_staging}")
+                                step_lines.append(f"WHERE {c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = {c});")
+                                step_lines.append(f"")
+                            else:
+                                step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = {c});")
+                        elif fk_action == "null_fill_fk":
+                            step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = {c});")
+                        elif fk_action == "create_unknown_dim_record":
+                            step_lines.append(f"INSERT INTO {parent_tbl} ([{rel_col}])")
+                            step_lines.append(f"SELECT DISTINCT r.{c}")
                             step_lines.append(f"FROM {tbl_staging} r")
                             step_lines.append(f"WHERE r.{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = r.{c});")
                             step_lines.append(f"")
-                            step_lines.append(f"DELETE FROM {tbl_staging}")
-                            step_lines.append(f"WHERE {c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = {c});")
-                            step_lines.append(f"")
-                        else:
-                            step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = {c});")
-                    elif fk_action == "null_fill_fk":
-                        step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = {c});")
-                    elif fk_action == "create_unknown_dim_record":
-                        step_lines.append(f"INSERT INTO {parent_tbl} ([{rel_col}])")
-                        step_lines.append(f"SELECT DISTINCT r.{c}")
-                        step_lines.append(f"FROM {tbl_staging} r")
-                        step_lines.append(f"WHERE r.{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {parent_tbl} p WHERE p.[{rel_col}] = r.{c});")
-                        step_lines.append(f"")
 
-        phase_validate_lines = list(step_lines)
-        step_lines = []
+            phase_validate_lines = list(step_lines)
+            step_lines = []
 
-        # Post-validation type parsing phase (runs AFTER validation to preserve raw values for reject logging)
-        parse_update_clauses = []
-        parsed_cols_seen = set()
-        for st in steps:
-            col = st.get("column")
-            if not col or col in local_excluded_columns:
-                continue
-            if st.get("action") == "parse_dates" and col not in parsed_cols_seen:
-                parsed_cols_seen.add(col)
-                col_meta = cols_info.get(col) or {}
-                compiled_expr = compile_column_expression(col, [st], col_meta, business_rules)
-                if compiled_expr != f"[{col}]":
-                    parse_update_clauses.append(f"[{col}] = {compiled_expr}")
+            # Post-validation type parsing phase (runs AFTER validation to preserve raw values for reject logging)
+            parse_update_clauses = []
+            parsed_cols_seen = set()
+            for st in steps:
+                col = st.get("column")
+                if not col or col in local_excluded_columns:
+                    continue
+                if st.get("action") == "parse_dates" and col not in parsed_cols_seen:
+                    parsed_cols_seen.add(col)
+                    col_meta = cols_info.get(col) or {}
+                    compiled_expr = compile_column_expression(col, [st], col_meta, business_rules, plan.get("semantic_schema"), ds_name)
+                    if compiled_expr != f"[{col}]":
+                        parse_update_clauses.append(f"[{col}] = {compiled_expr}")
 
-        if parse_update_clauses:
-            step_lines.append(f"-- Post-validation date/type parsing on {tbl_staging}")
-            update_sql = f"UPDATE {tbl_staging}\nSET " + ",\n    ".join(parse_update_clauses) + "\nWHERE 1=1;"
-            step_lines.extend(update_sql.splitlines())
-            step_lines.append("")
-
-        phase_parse_lines = list(step_lines)
-        step_lines = []
-
-        # Phase 2: Expression-Based Chained Transformations (Single-Pass Update)
-        column_transforms = {}
-        for st in steps:
-            col = st.get("column")
-            if not col or col in local_excluded_columns:
-                continue
-            action = st.get("action")
-            # Only expressions
-            if action in ("trim", "lowercase", "uppercase", "sanitize_email", "normalize_phone", "hash_phone", "mask_phone", "standardize_boolean", "regex_replace", "range_clip", "coerce_numeric", "cast_type", "replace_values"):
-                if col not in column_transforms:
-                    column_transforms[col] = []
-                column_transforms[col].append(st)
-                
-        update_clauses = []
-        for col_name, col_steps in column_transforms.items():
-            has_cast_type = any(st.get("action") == "cast_type" for st in col_steps)
-            base_steps = [st for st in col_steps if st.get("action") != "cast_type"]
-            col_meta = cols_info.get(col_name) or {}
-            
-            if base_steps:
-                compiled_expr = compile_column_expression(col_name, base_steps, col_meta, business_rules)
-                update_clauses.append(f"[{col_name}] = {compiled_expr}")
-            if has_cast_type:
-                col_clean = str(col_name).replace("'", "''")
-                update_clauses.append(f"[{col_clean}_int] = TRY_CAST([{col_name}] AS BIGINT)")
-                
-        if update_clauses:
-            step_lines.append(f"-- Single-Pass expression updates on {tbl_staging}")
-            update_sql = f"UPDATE {tbl_staging}\nSET " + ",\n    ".join(update_clauses) + "\nWHERE 1=1;"
-            step_lines.extend(update_sql.splitlines())
-            step_lines.append("")
-
-        phase_trim_lines = list(step_lines)
-        step_lines = []
-
-        # Phase 3: Outlier Flags dynamically processed via stored procedure
-        for st in steps:
-            col = st.get("column")
-            action = str(st.get("action") or "")
-            if not col or col in local_excluded_columns:
-                continue
-            col_clean = str(col).replace("'", "''")
-            if action in ("flag_outliers", "clip_or_flag"):
-                step_lines.append(f"-- Flag IQR outliers for {col}")
-                if dialect == "tsql":
-                    step_lines.append(f"EXEC dbo.sp_flag_outliers_iqr '{tbl_staging}', '{col_clean}';")
-                else:
-                    step_lines.append(f"-- ANSI outlier flagging placeholder")
-
-        phase_outlier_lines = list(step_lines)
-        step_lines = []
-
-        # Phase 4: Config-driven Default Seed & Single-Pass Join-based updates (defaults + invalid value replacements)
-        config_fill_columns = []
-        config_invalid_columns = []
-        
-        for st in steps:
-            col = st.get("column")
-            if not col or col in local_excluded_columns:
-                continue
-            action = st.get("action")
-            if action in ("zero_to_null",):
-                config_invalid_columns.append(col)
-            elif action in ("fill_or_drop", "fill_nulls_simple"):
-                config_fill_columns.append(st)
-                
-        config_columns = list(set([st.get("column") for st in config_fill_columns] + config_invalid_columns))
-        if config_columns:
-            pre_queries = []
-            set_clauses = []
-            join_clauses = []
-            where_clauses = []
-            fill_step_map = {st.get("column"): st for st in config_fill_columns}
-            
-            for col in sorted(config_columns):
-                col_bracket = _brk(col)
-                col_clean_name = str(col)
-                col_meta = cols_info.get(col) or {}
-                col_type = col_meta.get("dtype")
-                col_class = _classify_column(col, col_meta)
-                
-                cast_type = get_sql_cast_type(col_type, col_clean_name)
-                cast_func = "TRY_CAST" if dialect == "tsql" else "CAST"
-                
-                fval = None
-                strat = None
-                if col in fill_step_map:
-                    p = step_params(fill_step_map[col])
-                    strat = p.get("fill_strategy")
-                    fval = p.get("fill_value")
-                    
-                if fval is not None:
-                    val = fval
-                else:
-                    if col_class in ("date", "id", "categorical"):
-                        val = None
-                    elif col_class == "metric":
-                        val = '0'
-                    else:
-                        val = None
-                        
-                has_invalid = col in config_invalid_columns
-                clean_tbl_base = tbl_clean.split(".")[-1].strip("[]")
-                tbl_key = clean_tbl_base
-                key = f"{tbl_key}.{col_clean_name}"
-                expr = f"c.{col_bracket}"
-                
-                if has_invalid:
-                    replace_vals = ["0", "-999", "999999", "9999999", "###"]
-                    if col in fill_step_map:
-                        replace_vals = step_params(fill_step_map[col]).get("replace_values") or replace_vals
-                    invalid_values_to_seed[key] = [str(v) for v in replace_vals]
-                    
-                    alias_iv = f"iv_{col_clean_name.replace('.', '_').replace(' ', '_')[:35]}"
-                    if col_class == "date":
-                        # Date columns compare as string explicitly to avoid conversion issues with sentinel values like '###'
-                        join_cond = f"CAST(c.{col_bracket} AS NVARCHAR(MAX)) = {alias_iv}.invalid_value"
-                    else:
-                        join_cond = f"{cast_func}({alias_iv}.invalid_value AS {cast_type}) = c.{col_bracket}"
-                    join_clauses.append(
-                        f"LEFT JOIN dbo.etl_invalid_values {alias_iv} ON {alias_iv}.column_name = '{key}' "
-                        f"AND {join_cond}"
-                    )
-                    expr = f"CASE WHEN {alias_iv}.invalid_value IS NOT NULL THEN NULL ELSE {expr} END"
-                    where_clauses.append(f"{alias_iv}.invalid_value IS NOT NULL")
-                    
-                if col in fill_step_map:
-                    if strat == "mean" and fval is None and dialect == "tsql":
-                        expr = f"COALESCE({expr}, (SELECT AVG(CAST(c2.{col_bracket} AS FLOAT)) FROM {tbl_staging} c2 WHERE c2.{col_bracket} IS NOT NULL))"
-                        where_clauses.append(f"c.{col_bracket} IS NULL")
-                    elif strat == "median" and fval is None and dialect == "tsql":
-                        var_name = f"@fill_{col_clean_name.replace('.', '_').replace(' ', '_')[:40]}"
-                        pre_queries.append(f"DECLARE {var_name} FLOAT;")
-                        pre_queries.append(
-                            f"SELECT {var_name} = PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {col_bracket}) FROM {tbl_staging} WHERE {col_bracket} IS NOT NULL;"
-                        )
-                        expr = f"COALESCE({expr}, {var_name})"
-                        where_clauses.append(f"c.{col_bracket} IS NULL")
-                    else:
-                        if val is not None:
-                            default_values_to_seed[key] = {"default_value": val, "data_type": cast_type}
-                            alias_dv = f"dv_{col_clean_name.replace('.', '_').replace(' ', '_')[:35]}"
-                            join_clauses.append(
-                                f"LEFT JOIN dbo.etl_default_values {alias_dv} ON {alias_dv}.column_name = '{key}'"
-                            )
-                            expr = f"COALESCE({expr}, {cast_func}({alias_dv}.default_value AS {cast_type}))"
-                            where_clauses.append(f"c.{col_bracket} IS NULL")
-                            
-                if expr != f"c.{col_bracket}":
-                    set_clauses.append(f"c.{col_bracket} = {expr}")
-                
-            if set_clauses:
-                step_lines.append(f"-- Grouped config and null updates on {tbl_staging}")
-                step_lines.extend(pre_queries)
-                update_sql = f"UPDATE c\nSET " + ",\n    ".join(set_clauses)
-                update_sql += f"\nFROM {tbl_staging} c"
-                if join_clauses:
-                    unique_joins = []
-                    for j in join_clauses:
-                        if j not in unique_joins:
-                            unique_joins.append(j)
-                    update_sql += "\n" + "\n".join(unique_joins)
-                unique_where = []
-                for w in where_clauses:
-                    if w not in unique_where:
-                        unique_where.append(w)
-                if unique_where:
-                    update_sql += "\nWHERE " + " OR ".join(unique_where) + ";"
-                else:
-                    update_sql += ";"
+            if parse_update_clauses:
+                step_lines.append(f"-- Post-validation date/type parsing on {tbl_staging}")
+                update_sql = f"UPDATE {tbl_staging}\nSET " + ",\n    ".join(parse_update_clauses) + "\nWHERE 1=1;"
                 step_lines.extend(update_sql.splitlines())
                 step_lines.append("")
 
-        phase_sentinel_lines = list(step_lines)
-        step_lines = []
+            phase_parse_lines = list(step_lines)
+            step_lines = []
 
-        # Phase 5: Final Copy from Staging to target Clean table
-        if dialect == "tsql":
-            clean_cols = cols + [f"{c}_outlier_flagged" for st in steps if st.get("action") in ("flag_outliers", "clip_or_flag") for c in [st.get("column")] if c and c not in excluded_columns]
+            # Phase 2: Expression-Based Chained Transformations (Single-Pass Update)
+            column_transforms = {}
             for st in steps:
-                if st.get("action") == "cast_type" and st.get("column"):
-                    cc = str(st.get("column")).replace("'", "''")
-                    if cc not in excluded_columns:
-                        clean_cols.append(f"{cc}_int")
-            clean_cols = sorted(list(set(clean_cols)))
-            col_list_clean = ", ".join(f"[{c}]" for c in clean_cols)
-
-            # Build typed SELECT expressions for safe insert from NVARCHAR(MAX) staging
-            select_parts = []
-            for c in clean_cols:
-                # Derived columns are already typed in staging — no cast needed
-                if c.endswith("_outlier_flagged") or c.endswith("_int"):
-                    select_parts.append(f"[{c}]")
+                col = st.get("column")
+                if not col or col in local_excluded_columns:
                     continue
-                col_meta = cols_info.get(c) or {}
-                col_type = col_meta.get("dtype") or col_meta.get("target_dtype") or ""
-                target_type = get_sql_cast_type(col_type, c)
-                if target_type == "NVARCHAR(MAX)":
-                    select_parts.append(f"[{c}]")
-                else:
-                    select_parts.append(f"TRY_CAST([{c}] AS {target_type})")
-            select_list_typed = ", ".join(select_parts)
-
-            step_lines.append("-- Copy fully transformed data from Staging to target Clean table")
-            step_lines.append("IF @load_type = 'FULL' OR @last_run IS NULL")
-            step_lines.append("BEGIN")
-            step_lines.append(f"    TRUNCATE TABLE {clean_tbl};")
-            step_lines.append(f"    INSERT INTO {clean_tbl} ({col_list_clean}, etl_batch_id, etl_created_at, etl_updated_at)")
-            step_lines.append(f"    SELECT {select_list_typed}, etl_batch_id, GETDATE(), GETDATE() FROM {tbl_staging};")
-            step_lines.append("END")
-            step_lines.append("ELSE")
-            step_lines.append("BEGIN")
-            if pk_col:
-                step_lines.append(f"    DELETE FROM {clean_tbl} WHERE [{pk_col}] IN (SELECT [{pk_col}] FROM {tbl_staging});")
-            step_lines.append(f"    INSERT INTO {clean_tbl} ({col_list_clean}, etl_batch_id, etl_created_at, etl_updated_at)")
-            step_lines.append(f"    SELECT {select_list_typed}, etl_batch_id, GETDATE(), GETDATE() FROM {tbl_staging};")
-            step_lines.append("END;")
-            step_lines.append("")
+                action = st.get("action")
+                # Only expressions
+                if action in ("trim", "lowercase", "uppercase", "sanitize_email", "normalize_phone", "hash_phone", "mask_phone", "standardize_boolean", "regex_replace", "range_clip", "coerce_numeric", "cast_type", "replace_values"):
+                    if col not in column_transforms:
+                        column_transforms[col] = []
+                    column_transforms[col].append(st)
+                
+            update_clauses = []
+            for col_name, col_steps in column_transforms.items():
+                has_cast_type = any(st.get("action") == "cast_type" for st in col_steps)
+                base_steps = [st for st in col_steps if st.get("action") != "cast_type"]
+                col_meta = cols_info.get(col_name) or {}
             
-            # Compute max watermark date from staging before cleanup
-            if watermark_col:
-                step_lines.append(f"DECLARE @max_watermark DATETIME = COALESCE((SELECT MAX(TRY_CAST([{watermark_col}] AS DATETIME)) FROM {tbl_staging}), @last_run, GETDATE());")
+                if base_steps:
+                    compiled_expr = compile_column_expression(col_name, base_steps, col_meta, business_rules, plan.get("semantic_schema"), ds_name)
+                    update_clauses.append(f"[{col_name}] = {compiled_expr}")
+                if has_cast_type:
+                    col_clean = str(col_name).replace("'", "''")
+                    update_clauses.append(f"[{col_clean}_int] = TRY_CAST([{col_name}] AS BIGINT)")
+                
+            if update_clauses:
+                step_lines.append(f"-- Single-Pass expression updates on {tbl_staging}")
+                update_sql = f"UPDATE {tbl_staging}\nSET " + ",\n    ".join(update_clauses) + "\nWHERE 1=1;"
+                step_lines.extend(update_sql.splitlines())
                 step_lines.append("")
-            # Clean up the staging table
-            step_lines.append(f"IF OBJECT_ID('tempdb..{tbl_staging}') IS NOT NULL DROP TABLE {tbl_staging};")
-            step_lines.append("")
 
-        phase_copy_lines = list(step_lines)
-        step_lines = []
+            phase_trim_lines = list(step_lines)
+            step_lines = []
 
-        # Deduplication Phase: CTE-based dedup on staging after all validations
-        dedup_lines = []
-        if dialect == "tsql":
-            # Prefer row-level dedup (uses PK) over custom-column dedup steps
-            best_dedup = None
+            # Phase 3: Outlier Flags dynamically processed via stored procedure
             for st in steps:
-                if str(st.get("action") or "").lower() != "deduplicate":
+                col = st.get("column")
+                action = str(st.get("action") or "")
+                if not col or col in local_excluded_columns:
                     continue
-                col_val = str(st.get("column") or "").strip()
-                is_row_level = col_val.lower() in ("row-level", "[row-level]", "")
-                if is_row_level:
-                    best_dedup = st
-                    break  # Row-level (PK) dedup is always preferred
-                elif best_dedup is None:
-                    best_dedup = st  # Keep custom-column dedup as fallback
-
-            if best_dedup:
-                col_val = str(best_dedup.get("column") or "").strip()
-                is_row_level = col_val.lower() in ("row-level", "[row-level]", "")
-                if is_row_level:
-                    if pk_col:
-                        partition_cols = [pk_col]
-                    elif cols:
-                        partition_cols = list(cols)
+                col_clean = str(col).replace("'", "''")
+                if action in ("flag_outliers", "clip_or_flag"):
+                    step_lines.append(f"-- Flag IQR outliers for {col}")
+                    if dialect == "tsql":
+                        step_lines.append(f"EXEC dbo.sp_flag_outliers_iqr '{tbl_staging}', '{col_clean}';")
                     else:
-                        partition_cols = ["column1", "column2"]
-                else:
-                    partition_cols = [c.strip() for c in col_val.split(",") if c.strip()]
+                        step_lines.append(f"-- ANSI outlier flagging placeholder")
 
-                partition_exprs = [
-                    f"LOWER(LTRIM(RTRIM(CAST([{c}] AS NVARCHAR(400)))))"
-                    for c in partition_cols
-                ]
-                partition_clause = ", ".join(partition_exprs)
-                if watermark_col:
-                    order_clause = f"[{watermark_col}] DESC"
-                else:
-                    order_clause = "(SELECT NULL)"
+            phase_outlier_lines = list(step_lines)
+            step_lines = []
 
-                dedup_lines.append("-- Deduplicate staging table by partition key(s)")
-                dedup_lines.append(";WITH _staging_dedup AS (")
-                dedup_lines.append(f"    SELECT ROW_NUMBER() OVER (PARTITION BY {partition_clause} ORDER BY {order_clause}) AS _rn")
-                dedup_lines.append(f"    FROM {tbl_staging}")
-                dedup_lines.append(")")
-                dedup_lines.append("DELETE FROM _staging_dedup WHERE _rn > 1;")
-                dedup_lines.append("")
-
-        # Combine all phases in correct execution order:
-        # 1. Trims & Casings  2. Sentinel/Placeholder Nullification  3. Format/Null Validations
-        # 4. Post-validation Type Parsing  5. Outlier Flags  6. Deduplication  7. Final Copy
-        step_lines = phase_trim_lines + phase_sentinel_lines + phase_validate_lines + phase_parse_lines + phase_outlier_lines + dedup_lines + phase_copy_lines
-
-        if dialect == "tsql":
-            proc_lines.extend(step_lines)
-            proc_lines.append("")
-            proc_lines.append("-- Update process watermark")
-            proc_lines.append("IF @load_type = 'INCREMENTAL' OR @last_run IS NULL")
-            proc_lines.append("BEGIN")
-            proc_lines.append("    MERGE INTO dbo.etl_watermark AS target")
-            proc_lines.append(f"    USING (SELECT 'etl_clean_{tbl_base}' AS process_name) AS source")
-            proc_lines.append("    ON target.process_name = source.process_name")
-            wm_expr = "@max_watermark" if watermark_col else "GETDATE()"
-            proc_lines.append("    WHEN MATCHED THEN")
-            proc_lines.append(f"        UPDATE SET last_run_time = {wm_expr}")
-            proc_lines.append("    WHEN NOT MATCHED THEN")
-            proc_lines.append(f"        INSERT (process_name, last_run_time) VALUES (source.process_name, {wm_expr});")
-            proc_lines.append("END")
+            # Phase 4: Config-driven Default Seed & Single-Pass Join-based updates (defaults + invalid value replacements)
+            config_fill_columns = []
+            config_invalid_columns = []
+        
+            for st in steps:
+                col = st.get("column")
+                if not col or col in local_excluded_columns:
+                    continue
+                action = st.get("action")
+                if action in ("zero_to_null",):
+                    config_invalid_columns.append(col)
+                elif action in ("fill_or_drop", "fill_nulls_simple"):
+                    config_fill_columns.append(st)
+                
+            config_columns = list(set([st.get("column") for st in config_fill_columns] + config_invalid_columns))
+            if config_columns:
+                pre_queries = []
+                set_clauses = []
+                join_clauses = []
+                where_clauses = []
+                fill_step_map = {st.get("column"): st for st in config_fill_columns}
             
-            # Indent and append child procedure body
-            lines.extend(_indent(proc_lines, spaces=8))
-            lines.append("        COMMIT;")
-            lines.append("")
-            lines.append("        -- Log success")
-            lines.append("        UPDATE dbo.etl_log")
-            lines.append("        SET end_time = GETDATE(), status = 'SUCCESS'")
-            where_id_str = "        WHERE id = @run_id;"
-            lines.append(where_id_str)
-            lines.append("    END TRY")
-            lines.append("    BEGIN CATCH")
-            lines.append("        IF @@TRANCOUNT > 0 ROLLBACK;")
-            lines.append("        DECLARE @err VARCHAR(MAX) = ERROR_MESSAGE();")
-            lines.append("        UPDATE dbo.etl_log")
-            lines.append("        SET end_time = GETDATE(), status = 'FAILED', error_message = @err")
-            lines.append(where_id_str)
-            lines.append("        THROW;")
-            lines.append("    END CATCH;")
-            lines.append("END;")
-            lines.append("GO")
-            lines.append("")
-        else:
-            lines.extend(step_lines)
-            lines.append("")
+                for col in sorted(config_columns):
+                    col_bracket = _brk(col)
+                    col_clean_name = str(col)
+                    col_meta = cols_info.get(col) or {}
+                    col_type = col_meta.get("dtype")
+                    col_class = _classify_column(col, col_meta, plan.get("semantic_schema"), ds_name)
+                
+                    cast_type = get_sql_cast_type(col_type, col_clean_name)
+                    cast_func = "TRY_CAST" if dialect == "tsql" else "CAST"
+                
+                    fval = None
+                    strat = None
+                    if col in fill_step_map:
+                        p = step_params(fill_step_map[col])
+                        strat = p.get("fill_strategy")
+                        fval = p.get("fill_value")
+                    
+                    if fval is not None:
+                        val = fval
+                    else:
+                        if col_class in ("date", "id", "categorical"):
+                            val = None
+                        elif col_class == "metric":
+                            val = '0'
+                        else:
+                            val = None
+                        
+                    has_invalid = col in config_invalid_columns
+                    clean_tbl_base = tbl_clean.split(".")[-1].strip("[]")
+                    tbl_key = clean_tbl_base
+                    key = f"{tbl_key}.{col_clean_name}"
+                    expr = f"c.{col_bracket}"
+                
+                    if has_invalid:
+                        replace_vals = ["0", "-999", "999999", "9999999", "###"]
+                        if col in fill_step_map:
+                            replace_vals = step_params(fill_step_map[col]).get("replace_values") or replace_vals
+                        invalid_values_to_seed[key] = [str(v) for v in replace_vals]
+                    
+                        alias_iv = f"iv_{col_clean_name.replace('.', '_').replace(' ', '_')[:35]}"
+                        if col_class == "date":
+                            # Date columns compare as string explicitly to avoid conversion issues with sentinel values like '###'
+                            join_cond = f"CAST(c.{col_bracket} AS NVARCHAR(MAX)) = {alias_iv}.invalid_value"
+                        else:
+                            join_cond = f"{cast_func}({alias_iv}.invalid_value AS {cast_type}) = c.{col_bracket}"
+                        join_clauses.append(
+                            f"LEFT JOIN dbo.etl_invalid_values {alias_iv} ON {alias_iv}.column_name = '{key}' "
+                            f"AND {join_cond}"
+                        )
+                        expr = f"CASE WHEN {alias_iv}.invalid_value IS NOT NULL THEN NULL ELSE {expr} END"
+                        where_clauses.append(f"{alias_iv}.invalid_value IS NOT NULL")
+                    
+                    if col in fill_step_map:
+                        if strat == "mean" and fval is None and dialect == "tsql":
+                            expr = f"COALESCE({expr}, (SELECT AVG(CAST(c2.{col_bracket} AS FLOAT)) FROM {tbl_staging} c2 WHERE c2.{col_bracket} IS NOT NULL))"
+                            where_clauses.append(f"c.{col_bracket} IS NULL")
+                        elif strat == "median" and fval is None and dialect == "tsql":
+                            var_name = f"@fill_{col_clean_name.replace('.', '_').replace(' ', '_')[:40]}"
+                            pre_queries.append(f"DECLARE {var_name} FLOAT;")
+                            pre_queries.append(
+                                f"SELECT {var_name} = PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {col_bracket}) FROM {tbl_staging} WHERE {col_bracket} IS NOT NULL;"
+                            )
+                            expr = f"COALESCE({expr}, {var_name})"
+                            where_clauses.append(f"c.{col_bracket} IS NULL")
+                        else:
+                            if val is not None:
+                                default_values_to_seed[key] = {"default_value": val, "data_type": cast_type}
+                                alias_dv = f"dv_{col_clean_name.replace('.', '_').replace(' ', '_')[:35]}"
+                                join_clauses.append(
+                                    f"LEFT JOIN dbo.etl_default_values {alias_dv} ON {alias_dv}.column_name = '{key}'"
+                                )
+                                expr = f"COALESCE({expr}, {cast_func}({alias_dv}.default_value AS {cast_type}))"
+                                where_clauses.append(f"c.{col_bracket} IS NULL")
+                            
+                    if expr != f"c.{col_bracket}":
+                        set_clauses.append(f"c.{col_bracket} = {expr}")
+                
+                if set_clauses:
+                    step_lines.append(f"-- Grouped config and null updates on {tbl_staging}")
+                    step_lines.extend(pre_queries)
+                    update_sql = f"UPDATE c\nSET " + ",\n    ".join(set_clauses)
+                    update_sql += f"\nFROM {tbl_staging} c"
+                    if join_clauses:
+                        unique_joins = []
+                        for j in join_clauses:
+                            if j not in unique_joins:
+                                unique_joins.append(j)
+                        update_sql += "\n" + "\n".join(unique_joins)
+                    unique_where = []
+                    for w in where_clauses:
+                        if w not in unique_where:
+                            unique_where.append(w)
+                    if unique_where:
+                        update_sql += "\nWHERE " + " OR ".join(unique_where) + ";"
+                    else:
+                        update_sql += ";"
+                    step_lines.extend(update_sql.splitlines())
+                    step_lines.append("")
+
+            phase_sentinel_lines = list(step_lines)
+            step_lines = []
+
+            # Phase 5: Final Copy from Staging to target Clean table
+            if dialect == "tsql":
+                clean_cols = cols + [f"{c}_outlier_flagged" for st in steps if st.get("action") in ("flag_outliers", "clip_or_flag") for c in [st.get("column")] if c and c not in excluded_columns]
+                for st in steps:
+                    if st.get("action") == "cast_type" and st.get("column"):
+                        cc = str(st.get("column")).replace("'", "''")
+                        if cc not in excluded_columns:
+                            clean_cols.append(f"{cc}_int")
+                clean_cols = sorted(list(set(clean_cols)))
+                col_list_clean = ", ".join(f"[{c}]" for c in clean_cols)
+
+                # Build typed SELECT expressions for safe insert from NVARCHAR(MAX) staging
+                select_parts = []
+                for c in clean_cols:
+                    # Derived columns are already typed in staging — no cast needed
+                    if c.endswith("_outlier_flagged") or c.endswith("_int"):
+                        select_parts.append(f"[{c}]")
+                        continue
+                    col_meta = cols_info.get(c) or {}
+                    col_type = col_meta.get("dtype") or col_meta.get("target_dtype") or ""
+                    target_type = get_sql_cast_type(col_type, c)
+                    if target_type == "NVARCHAR(MAX)":
+                        select_parts.append(f"[{c}]")
+                    else:
+                        select_parts.append(f"TRY_CAST([{c}] AS {target_type})")
+                select_list_typed = ", ".join(select_parts)
+
+                if scd_type == "type2":
+                    step_lines.append("-- Copy fully transformed data from Staging to target Clean table (SCD Type 2)")
+                    step_lines.append("IF @load_type = 'FULL' OR @last_run IS NULL")
+                    step_lines.append("BEGIN")
+                    step_lines.append(f"    TRUNCATE TABLE {clean_tbl};")
+                    step_lines.append(f"    INSERT INTO {clean_tbl} ({col_list_clean}, start_date, end_date, is_current, etl_batch_id, etl_created_at, etl_updated_at)")
+                    step_lines.append(f"    SELECT {select_list_typed}, GETDATE(), '9999-12-31', 1, etl_batch_id, GETDATE(), GETDATE() FROM {tbl_staging};")
+                    step_lines.append("END")
+                    step_lines.append("ELSE")
+                    step_lines.append("BEGIN")
+                    step_lines.append(f"    -- Expire existing active records")
+                    step_lines.append(f"    UPDATE target")
+                    step_lines.append(f"    SET target.end_date = GETDATE(), target.is_current = 0")
+                    step_lines.append(f"    FROM {clean_tbl} target")
+                    step_lines.append(f"    INNER JOIN {tbl_staging} staging ON target.[{pk_col}] = staging.[{pk_col}]")
+                    step_lines.append(f"    WHERE target.is_current = 1;")
+                    step_lines.append(f"")
+                    step_lines.append(f"    -- Insert new active records")
+                    step_lines.append(f"    INSERT INTO {clean_tbl} ({col_list_clean}, start_date, end_date, is_current, etl_batch_id, etl_created_at, etl_updated_at)")
+                    step_lines.append(f"    SELECT {select_list_typed}, GETDATE(), '9999-12-31', 1, etl_batch_id, GETDATE(), GETDATE() FROM {tbl_staging};")
+                    step_lines.append("END;")
+                elif scd_type == "append":
+                    step_lines.append("-- Copy fully transformed data from Staging to target Clean table (Append-only)")
+                    step_lines.append(f"INSERT INTO {clean_tbl} ({col_list_clean}, etl_batch_id, etl_created_at, etl_updated_at)")
+                    step_lines.append(f"SELECT {select_list_typed}, etl_batch_id, GETDATE(), GETDATE() FROM {tbl_staging};")
+                elif scd_type == "truncate":
+                    step_lines.append("-- Copy fully transformed data from Staging to target Clean table (Truncate and Load)")
+                    step_lines.append(f"TRUNCATE TABLE {clean_tbl};")
+                    step_lines.append(f"INSERT INTO {clean_tbl} ({col_list_clean}, etl_batch_id, etl_created_at, etl_updated_at)")
+                    step_lines.append(f"SELECT {select_list_typed}, etl_batch_id, GETDATE(), GETDATE() FROM {tbl_staging};")
+                else:  # type1
+                    step_lines.append("-- Copy fully transformed data from Staging to target Clean table (SCD Type 1)")
+                    step_lines.append("IF @load_type = 'FULL' OR @last_run IS NULL")
+                    step_lines.append("BEGIN")
+                    step_lines.append(f"    TRUNCATE TABLE {clean_tbl};")
+                    step_lines.append(f"    INSERT INTO {clean_tbl} ({col_list_clean}, etl_batch_id, etl_created_at, etl_updated_at)")
+                    step_lines.append(f"    SELECT {select_list_typed}, etl_batch_id, GETDATE(), GETDATE() FROM {tbl_staging};")
+                    step_lines.append("END")
+                    step_lines.append("ELSE")
+                    step_lines.append("BEGIN")
+                    if pk_col:
+                        step_lines.append(f"    DELETE FROM {clean_tbl} WHERE [{pk_col}] IN (SELECT [{pk_col}] FROM {tbl_staging});")
+                    step_lines.append(f"    INSERT INTO {clean_tbl} ({col_list_clean}, etl_batch_id, etl_created_at, etl_updated_at)")
+                    step_lines.append(f"    SELECT {select_list_typed}, etl_batch_id, GETDATE(), GETDATE() FROM {tbl_staging};")
+                    step_lines.append("END;")
+                
+                step_lines.append("")
+                # S3-01: Post-load Row Count Verification
+                step_lines.append(f"DECLARE @staging_rows INT = (SELECT COUNT(*) FROM {tbl_staging});")
+                step_lines.append(f"DECLARE @target_rows INT = (SELECT COUNT(*) FROM {clean_tbl});")
+                step_lines.append("IF @staging_rows > 0 AND @target_rows = 0")
+                step_lines.append("BEGIN")
+                step_lines.append("    RAISERROR('Post-load assertion failed: Target table is empty but staging had rows.', 16, 1);")
+                step_lines.append("END;")
+                step_lines.append("")
+            
+                # Compute max watermark date from staging before cleanup
+                if watermark_col:
+                    step_lines.append(f"DECLARE @max_watermark DATETIME = COALESCE((SELECT MAX(TRY_CAST([{watermark_col}] AS DATETIME)) FROM {tbl_staging}), @last_run, GETDATE());")
+                    step_lines.append("")
+                # Clean up the staging table
+                step_lines.append(f"IF OBJECT_ID('tempdb..{tbl_staging}') IS NOT NULL DROP TABLE {tbl_staging};")
+                step_lines.append("")
+
+            phase_copy_lines = list(step_lines)
+            step_lines = []
+
+            # Deduplication Phase: CTE-based dedup on staging after all validations
+            dedup_lines = []
+            if dialect == "tsql":
+                # Prefer row-level dedup (uses PK) over custom-column dedup steps
+                best_dedup = None
+                for st in steps:
+                    if str(st.get("action") or "").lower() != "deduplicate":
+                        continue
+                    col_val = str(st.get("column") or "").strip()
+                    is_row_level = col_val.lower() in ("row-level", "[row-level]", "")
+                    if is_row_level:
+                        best_dedup = st
+                        break  # Row-level (PK) dedup is always preferred
+                    elif best_dedup is None:
+                        best_dedup = st  # Keep custom-column dedup as fallback
+
+                if best_dedup:
+                    col_val = str(best_dedup.get("column") or "").strip()
+                    is_row_level = col_val.lower() in ("row-level", "[row-level]", "")
+                    if is_row_level:
+                        if pk_col:
+                            partition_cols = [pk_col]
+                        elif cols:
+                            partition_cols = list(cols)
+                        else:
+                            partition_cols = ["column1", "column2"]
+                    else:
+                        partition_cols = [c.strip() for c in col_val.split(",") if c.strip()]
+
+                    partition_exprs = [
+                        f"LOWER(LTRIM(RTRIM(CAST([{c}] AS NVARCHAR(400)))))"
+                        for c in partition_cols
+                    ]
+                    partition_clause = ", ".join(partition_exprs)
+                    if watermark_col:
+                        order_clause = f"[{watermark_col}] DESC"
+                    else:
+                        order_clause = "(SELECT NULL)"
+
+                    dedup_lines.append("-- Deduplicate staging table by partition key(s)")
+                    dedup_lines.append(";WITH _staging_dedup AS (")
+                    dedup_lines.append(f"    SELECT ROW_NUMBER() OVER (PARTITION BY {partition_clause} ORDER BY {order_clause}) AS _rn")
+                    dedup_lines.append(f"    FROM {tbl_staging}")
+                    dedup_lines.append(")")
+                    dedup_lines.append("DELETE FROM _staging_dedup WHERE _rn > 1;")
+                    dedup_lines.append("")
+
+            # Combine all phases in correct execution order:
+            # 1. Trims & Casings  2. Sentinel/Placeholder Nullification  3. Format/Null Validations
+            # 4. Post-validation Type Parsing  5. Outlier Flags  6. Deduplication  7. Final Copy
+            step_lines = phase_trim_lines + phase_sentinel_lines + phase_validate_lines + phase_parse_lines + phase_outlier_lines + dedup_lines + phase_copy_lines
+
+            if dialect == "tsql":
+                proc_lines.extend(step_lines)
+                proc_lines.append("")
+                proc_lines.append("-- Update process watermark")
+                proc_lines.append("IF @load_type = 'INCREMENTAL' OR @last_run IS NULL")
+                proc_lines.append("BEGIN")
+                proc_lines.append("    MERGE INTO dbo.etl_watermark WITH (HOLDLOCK) AS target")
+                proc_lines.append(f"    USING (SELECT '{sp_name}' AS process_name) AS source")
+                proc_lines.append("    ON target.process_name = source.process_name")
+                wm_expr = "@max_watermark" if watermark_col else "GETDATE()"
+                proc_lines.append("    WHEN MATCHED THEN")
+                proc_lines.append(f"        UPDATE SET last_run_time = {wm_expr}")
+                proc_lines.append("    WHEN NOT MATCHED THEN")
+                proc_lines.append(f"        INSERT (process_name, last_run_time) VALUES (source.process_name, {wm_expr});")
+                proc_lines.append("END")
+            
+                # Indent and append child procedure body
+                lines.extend(_indent(proc_lines, spaces=8))
+                lines.append("        COMMIT;")
+                lines.append("")
+                lines.append("        -- Log success")
+                lines.append("        UPDATE dbo.etl_log")
+                lines.append("        SET end_time = GETDATE(), status = 'SUCCESS'")
+                where_id_str = "        WHERE id = @run_id;"
+                lines.append(where_id_str)
+                lines.append("    END TRY")
+                lines.append("    BEGIN CATCH")
+                lines.append("        IF @@TRANCOUNT > 0 ROLLBACK;")
+                lines.append("        DECLARE @err VARCHAR(MAX) = ERROR_MESSAGE();")
+                lines.append("        UPDATE dbo.etl_log")
+                lines.append("        SET end_time = GETDATE(), status = 'FAILED', error_message = @err")
+                lines.append(where_id_str)
+                lines.append("        THROW;")
+                lines.append("    END CATCH;")
+                lines.append("END;")
+                lines.append("GO")
+                lines.append("")
+            else:
+                lines.extend(step_lines)
+                lines.append("")
 
     # Generate master orchestrator procedure for T-SQL
     if dialect == "tsql":
@@ -1263,19 +1435,28 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
         lines.append("")
         lines.append("    BEGIN TRY")
         
-        # Execute each clean stored procedure
+        # Execute procedures based on generation_mode
         for ds_name in ds_plan.keys():
-            tbl_base = ds_name.split(".")[-1].strip("[]")
-            lines.append(f"        EXEC dbo.etl_clean_{tbl_base} @load_type = @load_type, @last_run = @last_run;")
+            tbl_base = ds_name.split('.')[-1].strip('[]')
+            if generation_mode in ('cleanse_only', 'full'):
+                lines.append(f'        EXEC dbo.etl_clean_{tbl_base} @load_type = @load_type, @last_run = @last_run;')
             
-        lines.append("")
+            if generation_mode in ('transform_only', 'full'):
+                from agent.etl_pipeline.dq_gate import check_dq_gate
+                threshold = float(business_rules.get('dq_threshold', 70.0))
+                gate_res = check_dq_gate(assessment, ds_name, threshold=threshold, force_unlock=ds_name in business_rules.get("force_unlock", []), sem_schema=plan.get("semantic_schema"))
+                if generation_mode == 'transform_only' or gate_res['passed']:
+                    lines.append(f'        EXEC dbo.etl_transform_{tbl_base} @load_type = @load_type, @last_run = @last_run;')
+                else:
+                    lines.append(f"        -- ⚠ Phase 2 transform blocked: dataset '{ds_name}' did not pass the DQ gate (Score: {gate_res['score']} < {threshold})")
+
         lines.append("        -- Update master process watermark")
         lines.append("        IF @load_type = 'INCREMENTAL' OR @last_run IS NULL")
         lines.append("        BEGIN")
-        lines.append("            MERGE INTO dbo.etl_watermark AS target")
+        lines.append("            MERGE INTO dbo.etl_watermark WITH (HOLDLOCK) AS target")
         lines.append("            USING (SELECT 'etl_main' AS process_name) AS source")
         lines.append("            ON target.process_name = source.process_name")
-        master_wm = "COALESCE((SELECT MAX(last_run_time) FROM dbo.etl_watermark WHERE process_name LIKE 'etl_clean_%'), GETDATE())"
+        master_wm = "COALESCE((SELECT MAX(last_run_time) FROM dbo.etl_watermark WHERE process_name LIKE 'etl_clean_%' OR process_name LIKE 'etl_transform_%'), GETDATE())"
         lines.append("            WHEN MATCHED THEN")
         lines.append(f"                UPDATE SET last_run_time = {master_wm}")
         lines.append("            WHEN NOT MATCHED THEN")
@@ -1366,4 +1547,38 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
         ddl_sql = ""
     full_sql = full_sql.replace("-- __DEFAULT_VALUES_DDL_PLACEHOLDER__", ddl_sql)
     full_sql = full_sql.replace("-- __DEFAULT_VALUES_SEED_PLACEHOLDER__", seed_sql)
+    
+    # S3-05: SQL Quality assessment badge
+    from agent.etl_pipeline.validate_sql import validate_sql_basic_dict
+    val_res = validate_sql_basic_dict(full_sql)
+    issues = val_res.get("issues") or []
+    
+    score = max(0, 100 - len(issues) * 15)
+    if score >= 90:
+        grade = "A"
+    elif score >= 80:
+        grade = "B"
+    elif score >= 70:
+        grade = "C"
+    else:
+        grade = "F"
+        
+    badge_lines = [
+        "-- ============================================================",
+        f"-- SQL QUALITY ASSESSMENT BADGE",
+        f"-- Score: {score}/100",
+        f"-- Grade: {grade}",
+    ]
+    if issues:
+        badge_lines.append(f"-- Issues Detected ({len(issues)}):")
+        for iss in issues:
+            badge_lines.append(f"--   - {iss}")
+    else:
+        badge_lines.append("-- No issues detected. Fully production ready!")
+    badge_lines.extend([
+        "-- ============================================================",
+        ""
+    ])
+    
+    full_sql = "\n".join(badge_lines) + full_sql
     return full_sql.strip() + "\n"

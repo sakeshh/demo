@@ -1,0 +1,14 @@
+[
+  {
+    "id": 1,
+    "name": "Alice"
+  },
+  {
+    "id": 2,
+    "name": "Bob\u0000\b"
+  },
+  {
+    "id": 3,
+    "name": "Ch\u00e4rlie"
+  }
+]

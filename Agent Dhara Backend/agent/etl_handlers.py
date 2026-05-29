@@ -224,6 +224,24 @@ def _engine_rec_to_codegen(rec: Dict[str, Any]) -> tuple[str, str]:
     return "python", dialect
 
 
+def _assessment_schema_signature(assess: Dict[str, Any]) -> str:
+    """Compute a stable hash of the datasets, column names, and types to detect schema changes."""
+    if not isinstance(assess, dict) or "datasets" not in assess:
+        return ""
+    import hashlib
+    parts = []
+    datasets = assess.get("datasets") or {}
+    for ds_name in sorted(datasets.keys()):
+        parts.append(f"ds:{ds_name}")
+        cols = datasets[ds_name].get("columns") or {}
+        for col_name in sorted(cols.keys()):
+            col_info = cols[col_name] or {}
+            dtype = str(col_info.get("dtype") or "")
+            parts.append(f"col:{col_name}|type:{dtype}")
+    sig_str = "\n".join(parts)
+    return hashlib.sha256(sig_str.encode("utf-8")).hexdigest()
+
+
 def etl_plan_start(
     session_id: str,
     business_rules: Any,
@@ -236,6 +254,7 @@ def etl_plan_start(
     tenant_id: Optional[str] = None,
     source_context: Optional[Dict[str, Any]] = None,
     engine_user_override: bool = False,
+    generation_mode: Optional[str] = "full",
 ) -> Dict[str, Any]:
     sid = (session_id or "default").strip() or "default"
     sess = load_session(sid)
@@ -251,6 +270,11 @@ def etl_plan_start(
 
     if isinstance(assessment_result, dict) and assessment_result.get("datasets"):
         ctx["last_assessment_result"] = assessment_result
+
+    flow = ctx.setdefault("etl_flow", {})
+    schema_sig = _assessment_schema_signature(assess)
+    flow["assessment_schema_signature"] = schema_sig
+    sess["session_state"] = "planned"
 
     ds_names = list((assess.get("datasets") or {}).keys())
     tid = (tenant_id or tenant_id_from_session(ctx) or "default").strip() or "default"
@@ -283,6 +307,7 @@ def etl_plan_start(
         rules_merged,
         engine=engine,
         source_context=src_ctx,
+        generation_mode=generation_mode,
     )
     draft_plan = enrich_plan_manual_review(draft_plan)
     
@@ -298,6 +323,7 @@ def etl_plan_start(
             rules_merged,
             engine=engine,
             source_context=src_ctx,
+            generation_mode=generation_mode,
         )
         plan = enrich_plan_manual_review(plan)
     else:
@@ -397,6 +423,7 @@ def etl_plan_start(
                 "sql_dialect": sd,
                 "target_destination": target_destination or "dataframe_only",
                 "target_path": target_path,
+                "generation_mode": generation_mode,
             },
             "approved_plan": None,
             "preview": None,
@@ -514,8 +541,19 @@ def etl_confirm_plan(session_id: str, plan_override: Optional[Dict[str, Any]] = 
     sess = load_session(sid)
     ctx = _ctx(sess)
     assess = _get_assessment(sess, None)
-    flow = ctx.get("etl_flow") or {}
+    flow = ctx.setdefault("etl_flow", {})
     _migrate_phase(flow)
+
+    schema_sig = _assessment_schema_signature(assess or {})
+    saved_sig = flow.get("assessment_schema_signature")
+    if saved_sig and schema_sig != saved_sig:
+        rollback_on_failure(flow, reason="Schema signature mismatch (underlying dataset/schema changed).")
+        save_session(sess)
+        return {
+            "ok": False,
+            "error": "SCHEMA_INVALIDATED",
+            "message": "The underlying dataset schema or connection has changed, invalidating the planned transformations. Rollback to planned state triggered.",
+        }
 
     plan = (
         plan_override
@@ -728,13 +766,25 @@ def etl_generate_code(
     sql_dialect: str = "tsql",
     *,
     codegen_mode: Optional[str] = None,
+    generation_mode: Optional[str] = "full",
 ) -> Dict[str, Any]:
     sid = (session_id or "default").strip() or "default"
     sess = load_session(sid)
     ctx = _ctx(sess)
     assess = _get_assessment(sess, None) or {}
-    flow = ctx.get("etl_flow") or {}
+    flow = ctx.setdefault("etl_flow", {})
     _migrate_phase(flow)
+
+    schema_sig = _assessment_schema_signature(assess)
+    saved_sig = flow.get("assessment_schema_signature")
+    if saved_sig and schema_sig != saved_sig:
+        rollback_on_failure(flow, reason="Schema signature mismatch (underlying dataset/schema changed).")
+        save_session(sess)
+        return {
+            "ok": False,
+            "error": "SCHEMA_INVALIDATED",
+            "message": "The underlying dataset schema or connection has changed, invalidating the planned transformations. Rollback to planned state triggered.",
+        }
 
     _migrate_phase(flow)
     current_phase = flow.get("phase", "planned")
@@ -759,6 +809,7 @@ def etl_generate_code(
             "message": "Confirm the plan first (POST /etl/confirm).",
         }
     plan = _rehydrate_plan(plan, ctx)
+    plan["generation_mode"] = generation_mode or plan.get("generation_mode") or flow.get("etl_intent", {}).get("generation_mode") or "full"
 
     eng = (engine or flow.get("codegen_engine") or "python").lower()
     intent = flow.get("etl_intent") or {}
@@ -844,6 +895,7 @@ def etl_generate_code(
     if ok:
         _transition(flow, "validated", by="system", reason=f"validator_passed generated_by={generated_by}")
         _transition(flow, "code_ready", by="system", reason="artifact_written")
+        sess["session_state"] = "generated"
     else:
         rollback_on_failure(flow, reason=f"validation_failed: {(errs or ['unknown'])[:3]}")
     latency_ms = (time.time() - t_gen) * 1000
@@ -910,3 +962,18 @@ def etl_get_lineage(session_id: str) -> Dict[str, Any]:
 
 def etl_list_tenants() -> Dict[str, Any]:
     return {"ok": True, "tenants": list_tenant_ids()}
+
+
+def etl_deploy(session_id: str) -> Dict[str, Any]:
+    sid = (session_id or "default").strip() or "default"
+    sess = load_session(sid)
+    flow = sess.setdefault("context", {}).setdefault("etl_flow", {})
+    if flow.get("phase") != "code_ready" and not flow.get("validation_ok"):
+        return {
+            "ok": False,
+            "error": "NOT_READY",
+            "message": "ETL code must be generated and validated before deployment."
+        }
+    sess["session_state"] = "deployed"
+    save_session(sess)
+    return {"ok": True, "session_id": sid, "session_state": "deployed"}

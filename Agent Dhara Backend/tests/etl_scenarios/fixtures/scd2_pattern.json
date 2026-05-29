@@ -1,0 +1,16 @@
+[
+  {
+    "customer_id": 101,
+    "name": "Alice",
+    "valid_from": "2026-01-01",
+    "valid_to": "2026-05-01",
+    "is_current": 0
+  },
+  {
+    "customer_id": 101,
+    "name": "Alicia",
+    "valid_from": "2026-05-02",
+    "valid_to": "9999-12-31",
+    "is_current": 1
+  }
+]

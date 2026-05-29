@@ -41,29 +41,49 @@ def build_step_params(
     strategy = str(rules.get("outlier_strategy") or "flag").lower()
 
     if act in ("fill_or_drop", "fill_nulls_simple"):
-        semantic_type = str(col_stats.get("semantic_type") or "").lower().strip()
-        
-        # ID, Date, Email, Phone should never be filled with metric defaults. Default to NULL.
-        if semantic_type in ("id", "date", "phone", "email"):
-            params["fill_strategy"] = "value"
-            params["fill_value"] = None
-        else:
-            rec = evidence.get("recommended_fill") if isinstance(evidence, dict) else None
-            if rec in ("mean", "median"):
-                params["fill_strategy"] = rec
-            elif _is_numeric_dtype(dtype, col_stats) and semantic_type == "metric":
-                params["fill_strategy"] = rec or "median"
-            elif _is_text_dtype(dtype, col_stats) or semantic_type == "text":
+        strat = col_stats.get("fill_strategy")
+        if strat:
+            if strat == "fill_zero":
                 params["fill_strategy"] = "value"
-                params["fill_value"] = None  # Leave as NULL instead of empty string
+                params["fill_value"] = 0
+            elif strat == "fill_median":
+                params["fill_strategy"] = "median"
+                if evidence.get("median") is not None:
+                    params["fill_value"] = evidence["median"]
+            elif strat == "fill_mean":
+                params["fill_strategy"] = "mean"
+                if evidence.get("mean") is not None:
+                    params["fill_value"] = evidence["mean"]
+            elif strat == "fill_mode":
+                params["fill_strategy"] = "value"
+                params["fill_value"] = ""
             else:
                 params["fill_strategy"] = "value"
                 params["fill_value"] = None
+        else:
+            semantic_type = str(col_stats.get("semantic_type") or "").lower().strip()
+            
+            # ID, Date, Email, Phone should never be filled with metric defaults. Default to NULL.
+            if semantic_type in ("id", "date", "phone", "email"):
+                params["fill_strategy"] = "value"
+                params["fill_value"] = None
+            else:
+                rec = evidence.get("recommended_fill") if isinstance(evidence, dict) else None
+                if rec in ("mean", "median"):
+                    params["fill_strategy"] = rec
+                elif _is_numeric_dtype(dtype, col_stats) and semantic_type == "metric":
+                    params["fill_strategy"] = rec or "median"
+                elif _is_text_dtype(dtype, col_stats) or semantic_type == "text":
+                    params["fill_strategy"] = "value"
+                    params["fill_value"] = None  # Leave as NULL instead of empty string
+                else:
+                    params["fill_strategy"] = "value"
+                    params["fill_value"] = None
 
-            if evidence.get("median") is not None and params.get("fill_strategy") == "median":
-                params["fill_value"] = evidence["median"]
-            elif evidence.get("mean") is not None and params.get("fill_strategy") == "mean":
-                params["fill_value"] = evidence["mean"]
+                if evidence.get("median") is not None and params.get("fill_strategy") == "median":
+                    params["fill_value"] = evidence["median"]
+                elif evidence.get("mean") is not None and params.get("fill_strategy") == "mean":
+                    params["fill_value"] = evidence["mean"]
 
     elif act in ("flag_outliers", "clip_or_flag", "clip_outliers", "cap_outliers", "range_clip"):
         method = strategy if strategy in ("flag", "clip", "cap") else "flag"

@@ -16,12 +16,60 @@ def _run_job(job: Dict[str, Any]) -> Dict[str, Any]:
     if kind == "assess":
         from agent.langgraph_orchestrator import run_orchestrator
 
-        return run_orchestrator(
-            user_request=str(inp.get("user_request") or ""),
+        user_req = inp.get("user_request")
+        if not user_req and inp.get("messages"):
+            msgs = inp.get("messages")
+            if isinstance(msgs, list) and len(msgs) > 0:
+                user_req = msgs[-1].get("content")
+
+        state = run_orchestrator(
+            user_request=str(user_req or ""),
             sources_path=str(inp.get("sources_path") or "config/sources.yaml"),
             selected_sources=inp.get("selected_sources") or [],
             job_id=job_id,
+            session_id=str(inp.get("sessionId") or inp.get("session_id") or "default").strip(),
         )
+
+        extractions = state.get("extractions") or []
+        merged_result = {
+            "datasets": {},
+            "relationships": [],
+            "data_quality_issues": {
+                "datasets": {},
+                "global_issues": {}
+            }
+        }
+        for ex in extractions:
+            res = ex.get("result")
+            if isinstance(res, dict):
+                merged_result["datasets"].update(res.get("datasets") or {})
+                merged_result["relationships"].extend(res.get("relationships") or [])
+                dq = res.get("data_quality_issues") or {}
+                merged_result["data_quality_issues"]["datasets"].update(dq.get("datasets") or {})
+                merged_result["data_quality_issues"]["global_issues"].update(dq.get("global_issues") or {})
+
+        from agent.chat_graph import _build_report_tables_markdown, _render_report_html, _write_report_artifacts
+
+        report_md = _build_report_tables_markdown(merged_result)
+        report_html = _render_report_html(merged_result)
+        artifacts = _write_report_artifacts(result=merged_result, report_markdown=report_md, report_html=report_html)
+
+        try:
+            from agent.session_store import load_session, save_session
+            sid = str(inp.get("sessionId") or inp.get("session_id") or "default").strip()
+            sess = load_session(sid)
+            ctx = sess.setdefault("context", {})
+            ctx["last_assessment_result"] = merged_result
+            save_session(sess)
+        except Exception:
+            pass
+
+        return {
+            "result": merged_result,
+            "report_markdown": report_md,
+            "report_html": report_html,
+            "report_files": artifacts,
+        }
 
     if kind == "chat":
         from agent.chat_graph import run_chat

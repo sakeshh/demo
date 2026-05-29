@@ -734,7 +734,56 @@ def merge_in_db_profile(sample_profile: Dict[str, Any], db_profile: Dict[str, An
 # DATA PROFILING (pandas dtypes + inference hint for object)
 # ============================================================
 
-def profile_dataframe(df: pd.DataFrame, job_id: Optional[str] = None) -> Dict[str, Any]:
+def select_top_priority_columns(df: pd.DataFrame, approved_semantics: Optional[Dict[str, str]] = None, top_n: int = 15) -> List[str]:
+    """
+    Select the top-N priority columns for deep profiling based on heuristics:
+    1. Key identifiers (ID, Key, Code, Ref, PK in name)
+    2. Date/Datetime columns
+    3. Email/Phone/UUID semantic types (or in name)
+    4. Numeric metric columns
+    5. Fallback: all other columns
+    """
+    col_scores = []
+    for col in df.columns:
+        col_lower = str(col).lower()
+        score = 0
+        
+        # Primary Key/Key identifiers
+        is_key = any(x in col_lower for x in ("id", "key", "code", "ref", "pk"))
+        # Email/Phone/UUID
+        is_contact_or_uuid = any(x in col_lower for x in ("email", "phone", "mobile", "contact", "tel", "uuid", "guid", "uid"))
+        # Date/Datetime
+        is_date = any(x in col_lower for x in ("date", "time", "dt", "created", "updated", "_at"))
+        
+        # Approved semantic override
+        approved_tag = (approved_semantics or {}).get(col, "").lower() if approved_semantics else ""
+        
+        if approved_tag in ("id", "pk"):
+            score = 10
+        elif is_key:
+            score = 9
+        elif approved_tag in ("email", "phone", "uuid") or is_contact_or_uuid:
+            score = 8
+        elif approved_tag in ("date", "datetime") or is_date:
+            score = 7
+        elif approved_tag == "metric" or pd.api.types.is_numeric_dtype(df[col]):
+            score = 6
+        else:
+            score = 1
+            
+        col_scores.append((score, col))
+        
+    # Sort descending by score, stable sorting (maintains original order for same score)
+    col_scores.sort(key=lambda x: x[0], reverse=True)
+    return [col for _, col in col_scores[:top_n]]
+
+
+def profile_dataframe(
+    df: pd.DataFrame,
+    job_id: Optional[str] = None,
+    thresholds: Optional[Dict[str, Any]] = None,
+    approved_semantics: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     """
     Returns a consistent profiling dictionary for a DataFrame, including:
     - row_count, column_count, data_volume_bytes
@@ -765,22 +814,34 @@ def profile_dataframe(df: pd.DataFrame, job_id: Optional[str] = None) -> Dict[st
     else:
         data_volume_bytes = int(df.memory_usage(deep=True).sum())
 
+    ext = thresholds.get("extended_checks") or {} if thresholds else {}
+    top_n = int(ext.get("top_n_priority_cols", 15))
+    priority_cols = set(select_top_priority_columns(df, approved_semantics, top_n))
+
     profile: Dict[str, Any] = {
         "row_count": row_count,
         "column_count": col_count,
         "data_volume_bytes": data_volume_bytes,
         "sampling_info": f"Full dataset has {row_count:,} rows. Analysis performed on a representative sample of {min(row_count, SAMPLING_THRESHOLD):,} rows." if row_count > SAMPLING_THRESHOLD else "Analysis performed on 100% of rows.",
-        "columns": {}
+        "columns": {},
+        "priority_columns": list(priority_cols),
     }
 
     def profile_col(col: str) -> Tuple[str, Dict[str, Any]]:
         s = df[col]
         dtype_str = str(s.dtype)
         semantic = detect_semantic_type(s, col)
-        hint = _dtype_inference_for_object(s) if _is_text_dtype(dtype_str) else None
-        if semantic == "numeric_id" and hint == "datetime_like":
-            hint = "numeric_like"
-        type_dist = scalar_type_distribution(s) if _is_text_dtype(dtype_str) else None
+        
+        is_priority = (col in priority_cols)
+        
+        if is_priority:
+            hint = _dtype_inference_for_object(s) if _is_text_dtype(dtype_str) else None
+            if semantic == "numeric_id" and hint == "datetime_like":
+                hint = "numeric_like"
+            type_dist = scalar_type_distribution(s) if _is_text_dtype(dtype_str) else None
+        else:
+            hint = None
+            type_dist = None
 
         raw_smp = s.dropna().head(20).astype(str).tolist()
 
@@ -794,25 +855,27 @@ def profile_dataframe(df: pd.DataFrame, job_id: Optional[str] = None) -> Dict[st
             "candidate_primary_key": safe_is_unique(s),
             "raw_samples": raw_smp,
         }
-        n_nonnull = int(s.notna().sum())
-        if n_nonnull > 0:
-            dupes = int(s.duplicated(keep=False).sum())
-            if dupes > 0:
-                col_profile["duplicate_value_count"] = dupes
-            try:
-                num = pd.to_numeric(s, errors="coerce")
-                nn = num.dropna()
-                if len(nn) >= 3:
-                    col_profile["mean"] = float(nn.mean())
-                    col_profile["median"] = float(nn.median())
-                    col_profile["std"] = float(nn.std())
-                    if len(nn) >= 8:
-                        sk = float(nn.skew())
-                        col_profile["skew"] = round(sk, 4)
-                        col_profile["p5"] = float(nn.quantile(0.05))
-                        col_profile["p95"] = float(nn.quantile(0.95))
-            except Exception:
-                pass
+        
+        if is_priority:
+            n_nonnull = int(s.notna().sum())
+            if n_nonnull > 0:
+                dupes = int(s.duplicated(keep=False).sum())
+                if dupes > 0:
+                    col_profile["duplicate_value_count"] = dupes
+                try:
+                    num = pd.to_numeric(s, errors="coerce")
+                    nn = num.dropna()
+                    if len(nn) >= 3:
+                        col_profile["mean"] = float(nn.mean())
+                        col_profile["median"] = float(nn.median())
+                        col_profile["std"] = float(nn.std())
+                        if len(nn) >= 8:
+                            sk = float(nn.skew())
+                            col_profile["skew"] = round(sk, 4)
+                            col_profile["p5"] = float(nn.quantile(0.05))
+                            col_profile["p95"] = float(nn.quantile(0.95))
+                except Exception:
+                    pass
         return col, col_profile
 
     # Parallelize column profiling for speed on large datasets
@@ -825,6 +888,12 @@ def profile_dataframe(df: pd.DataFrame, job_id: Optional[str] = None) -> Dict[st
             processed_cols += 1
             if job_id and col_count > 0:
                 pct = int((processed_cols / col_count) * 40) # 0-40% for profiling
+                overall_pct = 20 + pct
+                try:
+                    from agent.jobs_store import update_job_progress
+                    update_job_progress(job_id, overall_pct)
+                except Exception:
+                    pass
                 add_event(job_id=job_id, level="info", message=f"Profiling: {pct}% complete")
 
     return profile
@@ -1817,6 +1886,7 @@ def analyze_column(
     col: str,
     semantic: str,
     thresholds: Optional[Dict[str, Any]] = None,
+    is_priority: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Per-column data quality checks (uses thresholds when provided).
@@ -1878,6 +1948,9 @@ def analyze_column(
         rows = s.index[ws_mask].tolist()
         issues.append(dq_issue("low", "whitespace", f"{ws_cnt} leading/trailing spaces",
                                column=col, count=ws_cnt, rows=rows, sample=list(s[ws_mask].head(5))))
+
+    if not is_priority:
+        return issues
 
     # mixed scalar types (common in JSON IDs: alternating "0", 1, "2"...)
     try:
@@ -2446,6 +2519,10 @@ def run_extended_dq_checks(
             f"{len(df.columns)} columns; consider narrowing or documenting schema",
         ))
 
+    priority_cols = set(profile.get("priority_columns") or [])
+    if not priority_cols:
+        priority_cols = set(df.columns)
+
     cols_meta = profile.get("columns", {})
 
     def analyze_col_dq(col: str) -> List[Dict[str, Any]]:
@@ -2472,6 +2549,9 @@ def run_extended_dq_checks(
                 f"Column name has leading/trailing/embedded spaces: {cn!r}",
                 column=cn,
             ))
+
+        if col not in priority_cols:
+            return col_issues
 
         if uq == 1:
             col_issues.append(dq_issue(
@@ -2695,6 +2775,8 @@ def run_extended_dq_checks(
     # ----------------------------------------------------------------
 
     for col in df.columns:
+        if col not in priority_cols:
+            continue
         try:
             s = df[col]
             non_null = int(s.notna().sum())
@@ -2893,7 +2975,7 @@ def run_extended_dq_checks(
         from rapidfuzz import fuzz
         
         # We construct a string representation for each row (excluding ID/Timestamp cols to be smart)
-        text_cols = [c for c in df.columns if _is_text_dtype(df[c].dtype) and not c.lower().endswith("id")]
+        text_cols = [c for c in df.columns if c in priority_cols and _is_text_dtype(df[c].dtype) and not c.lower().endswith("id")]
         if len(text_cols) >= 2:
             max_rows = int(nd_cfg.get("max_rows", 50000))
             sub_df = df[text_cols].dropna(how="all")
@@ -2958,7 +3040,7 @@ def run_extended_dq_checks(
     # ------------------------------------------------------------
     # 6. Multivariate Outlier Detection using IsolationForest
     # ------------------------------------------------------------
-    num_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and not c.lower().endswith("id")]
+    num_cols = [c for c in df.columns if c in priority_cols and pd.api.types.is_numeric_dtype(df[c]) and not c.lower().endswith("id")]
     if len(num_cols) >= 2 and len(df) >= 10:
         outlier_cfg = (thresholds or {}).get("multivariate_outliers") or {}
         if outlier_cfg.get("enabled", True):
@@ -3345,6 +3427,7 @@ def analyze_dataset_quality(
     thresholds: Optional[Dict[str, Any]] = None,
     job_id: Optional[str] = None,
     business_rules: Optional[Dict[str, Any]] = None,
+    approved_semantics: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Return a dict with dataset-level issues + summary (uses config-driven thresholds for duplicate severity).
@@ -3370,6 +3453,9 @@ def analyze_dataset_quality(
         issues.append(dq_issue(sev, "duplicate_rows", f"{dup_rows} duplicate row(s)",
                                column="[Row-level]", count=dup_rows, rows=rows))
 
+    # Read priority columns from profile or select them on the fly
+    priority_cols = set(profile.get("priority_columns") or list(df.columns))
+
     # Parallelized column-level DQ checks
     with concurrent.futures.ThreadPoolExecutor() as executor:
         col_futures = [
@@ -3378,7 +3464,8 @@ def analyze_dataset_quality(
                 df[col],
                 col,
                 profile.get("columns", {}).get(col, {}).get("semantic_type", "unknown"),
-                thresholds
+                thresholds,
+                (col in priority_cols)
             )
             for col in df.columns
         ]
@@ -3991,9 +4078,45 @@ def load_and_profile(
             meta = enrich_assessment_with_profile(df, meta)
         except Exception:
             pass # ydata-profiling optional — graceful skip
-            
+
+        # S4-02: SQL Server Pushdown — compute stats server-side when connector available
         if name in db_connectors_by_dataset:
             connector, table = db_connectors_by_dataset[name]
+
+            # Pushdown aggregate stats (null counts, distinct counts, min/max)
+            try:
+                if hasattr(connector, 'compute_column_stats'):
+                    pushdown_stats = connector.compute_column_stats(table)
+                    if pushdown_stats.get("columns"):
+                        for col_name, pstats in pushdown_stats["columns"].items():
+                            if col_name in meta.get("columns", {}):
+                                col_meta = meta["columns"][col_name]
+                                # Use server-side null_percentage as authoritative
+                                if "null_percentage" in pstats:
+                                    col_meta["null_percentage"] = pstats["null_percentage"]
+                                if "distinct_count" in pstats and pstats["distinct_count"] is not None:
+                                    col_meta["unique_count"] = pstats["distinct_count"]
+                                if "min_value" in pstats:
+                                    col_meta["server_min"] = pstats["min_value"]
+                                if "max_value" in pstats:
+                                    col_meta["server_max"] = pstats["max_value"]
+                                if "sql_data_type" in pstats:
+                                    col_meta["sql_data_type"] = pstats["sql_data_type"]
+                                # Update candidate_primary_key based on exact distinct count
+                                if pushdown_stats.get("row_count") and pstats.get("distinct_count"):
+                                    col_meta["candidate_primary_key"] = (
+                                        pstats["distinct_count"] == pushdown_stats["row_count"]
+                                        and pstats.get("null_count", 0) == 0
+                                    )
+                        if job_id:
+                            from agent.jobs_store import add_event
+                            add_event(job_id=job_id, level="info", message=f"SQL pushdown stats enriched for {name}")
+            except Exception as e:
+                if job_id:
+                    from agent.jobs_store import add_event
+                    add_event(job_id=job_id, level="warning", message=f"SQL pushdown stats failed for {name}: {e}")
+
+            # Full database profiling (existing)
             try:
                 db_prof = profile_database_table_full(connector, table, df, job_id=job_id)
                 meta = merge_in_db_profile(meta, db_prof)
@@ -4032,7 +4155,9 @@ def load_and_profile(
             pass
 
     per_dataset_dq = {}
-    for name, df in datasets.items():
+    ds_list = list(datasets.keys())
+    for idx, name in enumerate(ds_list):
+        df = datasets[name]
         if job_id:
             from agent.jobs_store import add_event
             add_event(job_id=job_id, level="info", message=f"Analyzing data quality: {name}")
@@ -4040,6 +4165,12 @@ def load_and_profile(
         metadata[name]["quality"] = per_dataset_dq[name]
         if job_id:
             add_event(job_id=job_id, level="info", message=f"Quality check complete for {name}")
+            try:
+                from agent.jobs_store import update_job_progress
+                pct = int(60 + ((idx + 1) / len(ds_list)) * 20)
+                update_job_progress(job_id, pct)
+            except Exception:
+                pass
 
     # Apply custom rules from config and merge into per_dataset_dq
     custom_rules = (thresholds or {}).get("custom_rules") or []
@@ -4155,5 +4286,12 @@ def load_and_profile(
 
     if return_datasets:
         out["_datasets"] = datasets
+
+    if job_id:
+        try:
+            from agent.jobs_store import update_job_progress
+            update_job_progress(job_id, 100)
+        except Exception:
+            pass
 
     return out

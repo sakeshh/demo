@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { FaDatabase, FaFileAlt, FaChartBar, FaCode, FaCheck, FaArrowLeft, FaDownload, FaEye, FaArrowRight, FaClipboardList, FaTags } from 'react-icons/fa';
 import { useRouter } from 'next/navigation';
@@ -12,7 +12,9 @@ import EtlGenerationPanel from '@/components/EtlGenerationPanel';
 import DataCleaner from '@/components/DataCleaner';
 import Confetti from '@/components/Confetti';
 import SemanticReviewPanel from '@/components/SemanticReviewPanel';
-type Step = 'database' | 'files' | 'semantics' | 'assessment' | 'report' | 'requirements' | 'etl' | 'cleaning' | 'complete';
+import DQGateDashboard from '@/components/DQGateDashboard';
+import { DQGateResult } from '@/types/pipeline';
+type Step = 'database' | 'files' | 'assessment' | 'report' | 'semantics' | 'requirements' | 'etl' | 'cleaning' | 'complete';
 
 function generateHtmlReportFromBackend(html: string): string {
   return html || '<!doctype html><html><head><meta charset="utf-8" /></head><body>No HTML report available.</body></html>';
@@ -43,11 +45,148 @@ export default function DataPipelinePage() {
   const [includeDqRecommendations, setIncludeDqRecommendations] = useState<boolean>(true);
   const [etlSessionId, setEtlSessionId] = useState('default');
   const [approvedSemantics, setApprovedSemantics] = useState<Record<string, Record<string, string>> | null>(null);
+  const [dqThreshold, setDqThreshold] = useState<number>(70);
+  const [forceUnlock, setForceUnlock] = useState<boolean>(false);
+  const [semanticOverrides, setSemanticOverrides] = useState<Record<string, any>>({});
+
+  // Memoized client-side DQ Gate calculation matching backend check_dq_gate
+  const dqGate = useMemo<DQGateResult | null>(() => {
+    if (!assessmentData) return null;
+    
+    const resultData = assessmentData.result ?? assessmentData;
+    const datasets = resultData.datasets ?? {};
+    const datasetNames = Object.keys(datasets);
+    if (datasetNames.length === 0) return null;
+
+    const datasetGateDetails: Record<string, {
+      dq_score: number;
+      grade: 'A' | 'B' | 'C' | 'F';
+      phase2_allowed: boolean;
+      reason: string;
+    }> = {};
+    
+    let overallPassed = true;
+    let overallScoreSum = 0;
+    let hasHighPiiOverall = false;
+
+    for (const dsName of datasetNames) {
+      const dsInfo = datasets[dsName] || {};
+      const columns = dsInfo.columns || {};
+
+      // 1. Null Score (30%)
+      let nullScore = 100.0;
+      const colNames = Object.keys(columns);
+      if (colNames.length > 0) {
+        let nullPctSum = 0;
+        for (const colName of colNames) {
+          const col = columns[colName] || {};
+          const nullPct = col.null_percentage ?? col.null_pct ?? 0.0;
+          nullPctSum += nullPct;
+        }
+        const avgNull = nullPctSum / colNames.length;
+        nullScore = Math.max(0.0, 100.0 * Math.pow(1.0 - avgNull, 2));
+      }
+
+      // 2. Type Mismatch / Format Score (30%)
+      const dqIssues = [...((dsInfo.quality || {}).issues || [])];
+      const legacyIssues = (resultData.data_quality_issues || {}).datasets?.[dsName]?.issues || [];
+      dqIssues.push(...legacyIssues);
+
+      let typeMismatches = 0;
+      for (const issue of dqIssues) {
+        const issueType = String(issue.type || '').trim().toLowerCase();
+        if (['type_mismatch', 'invalid_date_format', 'invalid_email', 'invalid_phone'].includes(issueType)) {
+          typeMismatches += 1;
+        }
+      }
+      const typeScore = Math.max(0.0, 100.0 - typeMismatches * 10.0);
+
+      // 3. Duplicate Score (20%)
+      const llmDsHints = dsInfo.llm_hints || {};
+      const dupInfo = llmDsHints.business_key_confirmation || {};
+      let dupCount = typeof dupInfo === 'object' && dupInfo !== null ? (dupInfo.business_key_duplicate_count || 0) : 0;
+      for (const issue of dqIssues) {
+        const issueType = String(issue.type || '').trim().toLowerCase();
+        if (issueType.includes('duplicate') || issueType.includes('dup')) {
+          dupCount += 1;
+        }
+      }
+      const dupScore = Math.max(0.0, 100.0 - dupCount * 5.0);
+
+      // 4. Outlier Score (20%)
+      let outliersCount = 0;
+      for (const issue of dqIssues) {
+        const issueType = String(issue.type || '').trim().toLowerCase();
+        if (issueType.includes('outlier')) {
+          outliersCount += 1;
+        }
+      }
+      const outlierScore = Math.max(0.0, 100.0 - outliersCount * 10.0);
+
+      // Weighted DQ Score
+      const dqScore = 0.30 * nullScore + 0.30 * typeScore + 0.20 * dupScore + 0.20 * outlierScore;
+
+      // Check high PII
+      let hasHighPii = false;
+      for (const colName of colNames) {
+        const col = columns[colName] || {};
+        const overrideKey = `${dsName}.${colName}`;
+        const over = semanticOverrides[overrideKey];
+        const piiLevel = over ? over.pii_level : (col.pii_level || 'none');
+        if (piiLevel === 'high') {
+          hasHighPii = true;
+        }
+      }
+      if (hasHighPii) {
+        hasHighPiiOverall = true;
+      }
+
+      const effectiveThreshold = hasHighPii ? Math.min(dqThreshold + 15.0, 95.0) : dqThreshold;
+      const passed = dqScore >= effectiveThreshold || forceUnlock;
+
+      let grade: 'A' | 'B' | 'C' | 'F' = 'F';
+      if (dqScore >= 90) grade = 'A';
+      else if (dqScore >= 80) grade = 'B';
+      else if (dqScore >= 70) grade = 'C';
+
+      datasetGateDetails[dsName] = {
+        dq_score: Math.round(dqScore * 100) / 100,
+        grade,
+        phase2_allowed: passed,
+        reason: passed
+          ? ''
+          : `Dataset score (${Math.round(dqScore)}%) below effective threshold (${effectiveThreshold}%). Phase 2 transform requirements locked.`,
+      };
+
+      if (!passed) {
+        overallPassed = false;
+      }
+      overallScoreSum += dqScore;
+    }
+
+    const avgOverallScore = overallScoreSum / datasetNames.length;
+
+    return {
+      passed: overallPassed,
+      score: Math.round(avgOverallScore * 100) / 100,
+      threshold: dqThreshold,
+      force_unlocked: forceUnlock,
+      has_high_pii: hasHighPiiOverall,
+      details: {
+        null_score: 0,
+        type_score: 0,
+        duplicate_score: 0,
+        outlier_score: 0,
+      },
+      datasets: datasetGateDetails,
+    };
+  }, [assessmentData, dqThreshold, forceUnlock, semanticOverrides]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
     setEtlSessionId(window.localStorage.getItem('dharaSessionId') || 'default');
   }, [assessmentData]);
+
   const [userFeedback, setUserFeedback] = useState<Array<{
     step: string;
     liked: boolean;
@@ -57,9 +196,9 @@ export default function DataPipelinePage() {
   const steps = [
     { id: 'database', label: 'Database', icon: FaDatabase },
     { id: 'files', label: 'Files', icon: FaFileAlt },
-    { id: 'semantics', label: 'Semantics', icon: FaTags },
     { id: 'assessment', label: 'Assessment', icon: FaChartBar },
-    { id: 'report', label: 'Report', icon: FaChartBar },
+    { id: 'report', label: 'DQ Gate & Report', icon: FaChartBar },
+    { id: 'semantics', label: 'Semantics', icon: FaTags },
     { id: 'requirements', label: 'Requirements', icon: FaClipboardList },
     { id: 'etl', label: 'ETL Code', icon: FaCode },
     { id: 'cleaning', label: 'Data Cleaning', icon: FaCheck },
@@ -84,7 +223,7 @@ export default function DataPipelinePage() {
   const handleSemanticsComplete = (semantics: Record<string, Record<string, string>>) => {
     setApprovedSemantics(semantics);
     setDirection('forward');
-    setCurrentStep('assessment');
+    setCurrentStep('requirements');
   };
 
   const handleStartAssessment = () => {
@@ -125,7 +264,7 @@ export default function DataPipelinePage() {
   const handleProceedFromReport = () => {
     setShowReportView(false);
     setDirection('forward');
-    setCurrentStep('requirements');
+    setCurrentStep('semantics');
   };
 
   const handleETLGenerated = (code: string) => {
@@ -256,20 +395,8 @@ export default function DataPipelinePage() {
               <FileSelector
                 database={selectedDatabase}
                 onSelect={handleFilesSelect}
-                onNext={handleStartSemantics}
+                onNext={handleStartAssessment}
                 selectedFiles={selectedFiles}
-              />
-            )}
-
-            {currentStep === 'semantics' && selectedDatabase && (
-              <SemanticReviewPanel
-                database={selectedDatabase}
-                files={selectedFiles}
-                onComplete={handleSemanticsComplete}
-                onBack={() => {
-                  setDirection('back');
-                  setCurrentStep('files');
-                }}
               />
             )}
 
@@ -284,7 +411,7 @@ export default function DataPipelinePage() {
                   onIncludeDqRecommendationsChange={setIncludeDqRecommendations}
                   onComplete={handleAssessmentComplete}
                   onFeedback={(liked, comment) => handleFeedback('assessment', liked, comment)}
-                  approvedSemantics={approvedSemantics || undefined}
+                  approvedSemantics={semanticOverrides || undefined}
                 />
                 {assessmentData && (
                   <motion.button
@@ -297,7 +424,7 @@ export default function DataPipelinePage() {
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
                   >
-                    Continue to Report
+                    Continue to DQ Gate & Report
                   </motion.button>
                 )}
               </div>
@@ -305,6 +432,13 @@ export default function DataPipelinePage() {
 
             {currentStep === 'report' && assessmentData && (
               <div className="space-y-6">
+                {/* DQ Gate Dashboard */}
+                <DQGateDashboard
+                  gateResult={dqGate}
+                  threshold={dqThreshold}
+                  onThresholdChange={setDqThreshold}
+                />
+
                 {!showReportView ? (
                   <>
                     <h2 className="text-2xl font-bold text-zinc-900">Select Report Format</h2>
@@ -370,7 +504,7 @@ export default function DataPipelinePage() {
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
                       >
-                        Continue to ETL rules & plan
+                        Continue to Column Semantics
                         <FaArrowRight className="w-4 h-4" />
                       </motion.button>
                     )}
@@ -409,13 +543,27 @@ export default function DataPipelinePage() {
                         whileHover={{ scale: 1.02 }}
                         whileTap={{ scale: 0.98 }}
                       >
-                        Continue to ETL rules & plan
+                        Continue to Column Semantics
                         <FaArrowRight className="w-4 h-4" />
                       </motion.button>
                     </div>
                   </>
                 )}
               </div>
+            )}
+
+            {currentStep === 'semantics' && selectedDatabase && (
+              <SemanticReviewPanel
+                database={selectedDatabase}
+                files={selectedFiles}
+                assessment={assessmentData?.result ?? assessmentData}
+                dqGate={dqGate}
+                onComplete={handleSemanticsComplete}
+                onBack={() => {
+                  setDirection('back');
+                  setCurrentStep('report');
+                }}
+              />
             )}
 
             {currentStep === 'requirements' && (
@@ -430,6 +578,8 @@ export default function DataPipelinePage() {
                     assessment={(assessmentData?.result ?? assessmentData) as Record<string, unknown>}
                     variant="pipeline"
                     pipelineMode="requirements"
+                    gateResult={dqGate}
+                    semanticOverrides={semanticOverrides}
                     onContinueToEtlStep={() => {
                       setDirection('forward');
                       setCurrentStep('etl');
@@ -451,6 +601,8 @@ export default function DataPipelinePage() {
                     assessment={(assessmentData?.result ?? assessmentData) as Record<string, unknown>}
                     variant="pipeline"
                     pipelineMode="etl"
+                    gateResult={dqGate}
+                    semanticOverrides={semanticOverrides}
                     onEditPlanInRequirements={() => {
                       setDirection('back');
                       setCurrentStep('requirements');

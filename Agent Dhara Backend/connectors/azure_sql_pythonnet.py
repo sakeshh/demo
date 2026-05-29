@@ -4,6 +4,7 @@ Azure SQL connector using pythonnet (Microsoft.Data.SqlClient or System.Data.Sql
 
 import os
 import sys
+import re
 import clr_loader
 import pythonnet
 
@@ -270,3 +271,106 @@ class AzureSQLPythonNetConnector:
             return self._read_reader_to_df(reader)
         finally:
             conn.Close()
+
+    def compute_column_stats(self, table: str) -> Dict[str, Any]:
+        """
+        S4-02: SQL Server Pushdown — compute per-column aggregate stats directly
+        on the server to avoid pulling all rows into memory.
+
+        Returns:
+        {
+            "row_count": int,
+            "columns": {
+                "<col>": {
+                    "null_count": int,
+                    "null_percentage": float,
+                    "distinct_count": int,
+                    "min_value": str | None,
+                    "max_value": str | None,
+                },
+                ...
+            }
+        }
+        """
+        table_quoted = self._quote_two_part_name(table)
+
+        # Step 1: Get column names from schema
+        if "." in table:
+            schema, name = table.split(".", 1)
+        else:
+            schema, name = "dbo", table
+
+        conn = self._connect()
+        try:
+            conn.Open()
+
+            # Get column list
+            schema_sql = """
+            SELECT COLUMN_NAME, DATA_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
+            ORDER BY ORDINAL_POSITION
+            """
+            cmd = SqlCommand(schema_sql, conn)
+            cmd.Parameters.AddWithValue("@schema", schema)
+            cmd.Parameters.AddWithValue("@table", name)
+            reader = cmd.ExecuteReader()
+            col_info: List[Dict[str, str]] = []
+            while reader.Read():
+                col_info.append({
+                    "name": reader.GetString(0),
+                    "data_type": reader.GetString(1),
+                })
+            reader.Close()
+
+            if not col_info:
+                return {"row_count": 0, "columns": {}}
+
+            # Step 2: Build a single aggregate query for all columns
+            # Use CAST to NVARCHAR for min/max to handle all types uniformly
+            agg_parts = ["COUNT(*) AS [__row_count__]"]
+            for ci in col_info:
+                cname = ci["name"]
+                quoted = f"[{cname}]"
+                agg_parts.append(f"SUM(CASE WHEN {quoted} IS NULL THEN 1 ELSE 0 END) AS [{cname}__null_count]")
+                agg_parts.append(f"COUNT(DISTINCT {quoted}) AS [{cname}__distinct_count]")
+                # min/max: cast to NVARCHAR for uniform output
+                agg_parts.append(f"CAST(MIN({quoted}) AS NVARCHAR(MAX)) AS [{cname}__min_value]")
+                agg_parts.append(f"CAST(MAX({quoted}) AS NVARCHAR(MAX)) AS [{cname}__max_value]")
+
+            agg_sql = f"SELECT {', '.join(agg_parts)} FROM {table_quoted}"
+            cmd2 = SqlCommand(agg_sql, conn)
+            reader2 = cmd2.ExecuteReader()
+
+            result: Dict[str, Any] = {"row_count": 0, "columns": {}}
+            if reader2.Read():
+                row_count = int(reader2.GetValue(0)) if not reader2.IsDBNull(0) else 0
+                result["row_count"] = row_count
+
+                for ci in col_info:
+                    cname = ci["name"]
+                    null_count_idx = reader2.GetOrdinal(f"{cname}__null_count")
+                    distinct_idx = reader2.GetOrdinal(f"{cname}__distinct_count")
+                    min_idx = reader2.GetOrdinal(f"{cname}__min_value")
+                    max_idx = reader2.GetOrdinal(f"{cname}__max_value")
+
+                    null_count = int(reader2.GetValue(null_count_idx)) if not reader2.IsDBNull(null_count_idx) else 0
+                    distinct_count = int(reader2.GetValue(distinct_idx)) if not reader2.IsDBNull(distinct_idx) else 0
+                    min_val = str(reader2.GetValue(min_idx)) if not reader2.IsDBNull(min_idx) else None
+                    max_val = str(reader2.GetValue(max_idx)) if not reader2.IsDBNull(max_idx) else None
+
+                    null_pct = (null_count / row_count) if row_count > 0 else 0.0
+
+                    result["columns"][cname] = {
+                        "null_count": null_count,
+                        "null_percentage": round(null_pct, 6),
+                        "distinct_count": distinct_count,
+                        "min_value": min_val,
+                        "max_value": max_val,
+                        "sql_data_type": ci["data_type"],
+                    }
+
+            reader2.Close()
+            return result
+        finally:
+            conn.Close()

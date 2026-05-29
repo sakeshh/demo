@@ -70,6 +70,20 @@ def normalize_business_rules(raw: Any) -> Dict[str, Any]:
                 "message": ""
             })
 
+    # Pass through SCD configuration for per-dataset SCD type selection
+    scd_raw = raw.get("scd") or {}
+    if not isinstance(scd_raw, dict):
+        scd_raw = {}
+
+    # Pass through force_unlock list
+    force_unlock_raw = raw.get("force_unlock") or []
+    if not isinstance(force_unlock_raw, list):
+        force_unlock_raw = [force_unlock_raw] if force_unlock_raw else []
+
+    semantic_overrides_raw = raw.get("semantic_overrides") or raw.get("semanticOverrides") or {}
+    if not isinstance(semantic_overrides_raw, dict):
+        semantic_overrides_raw = {}
+
     return {
         "never_drop_rows": _bool(raw.get("never_drop_rows") or raw.get("neverDropRows"), False),
         "auto_resolve_pending": _bool(raw.get("auto_resolve_pending") or raw.get("autoResolvePending"), False),
@@ -79,7 +93,11 @@ def normalize_business_rules(raw: Any) -> Dict[str, Any]:
         "valid_values": {str(k): list(v) if isinstance(v, list) else [str(v)] for k, v in vv.items()},
         "custom_assertions": normalized_assertions,
         "outlier_strategy": str(raw.get("outlier_strategy") or raw.get("outlierStrategy") or "flag").lower(),
+        "dq_threshold": float(raw.get("dq_threshold") or raw.get("dqThreshold") or 70.0),
         "notes": notes,
+        "scd": scd_raw,
+        "force_unlock": force_unlock_raw,
+        "semantic_overrides": semantic_overrides_raw,
     }
 
 

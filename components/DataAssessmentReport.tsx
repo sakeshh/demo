@@ -186,7 +186,7 @@ export default function DataAssessmentReport({
       // Store deterministic selection context for the backend session.
       const context: any = {};
       if (src.kind === 'sql') {
-        context.last_table_list = files; // best effort for selection UX
+        context.last_table_list = files;
         context.selected_tables = files;
         context.selected_db_location_index = relIndex('database', src.absIndex);
       } else if (src.kind === 'blob') {
@@ -203,14 +203,14 @@ export default function DataAssessmentReport({
         context.approved_semantics = approvedSemantics;
       }
 
-      setProgress(25);
+      setProgress(15);
       await fetch('/api/session-context', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sid, context }),
       });
 
-      setProgress(45);
+      setProgress(25);
       const cmd =
         src.kind === 'sql'
           ? 'assess selected tables'
@@ -220,13 +220,44 @@ export default function DataAssessmentReport({
               ? 'assess selected local files'
               : 'help';
 
-      const chatRes = await fetch('/api/chat', {
+      const jobRes = await fetch('/api/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: sid, messages: [{ role: 'user', content: cmd }] }),
+        body: JSON.stringify({
+          kind: 'assess',
+          input: {
+            sessionId: sid,
+            messages: [{ role: 'user', content: cmd }]
+          }
+        }),
       });
-      const chatJson = await chatRes.json().catch(() => null);
-      const payload = chatJson?.payload ?? null;
+      
+      const jobData = await jobRes.json().catch(() => null);
+      if (!jobRes.ok || !jobData?.job_id) {
+        throw new Error(jobData?.message || 'Failed to start assessment job');
+      }
+      
+      const jobId = jobData.job_id;
+      let jobStatus = 'pending';
+      let jobResult: any = null;
+      
+      while (jobStatus !== 'completed' && jobStatus !== 'failed' && jobStatus !== 'succeeded') {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const statusRes = await fetch(`/api/assess/status/${jobId}`);
+        const statusData = await statusRes.json().catch(() => null);
+        if (!statusRes.ok || !statusData) {
+          throw new Error(statusData?.message || 'Failed to get job status');
+        }
+        jobStatus = statusData.status;
+        setProgress(Math.min(95, Math.max(25, statusData.progress || 0)));
+        if (jobStatus === 'completed' || jobStatus === 'succeeded') {
+          jobResult = statusData.result;
+        } else if (jobStatus === 'failed') {
+          throw new Error(statusData.error || 'Assessment job failed');
+        }
+      }
+
+      const payload = jobResult;
       const result: BackendAssessment | null = payload?.result ?? payload ?? null;
       setAssessment(result);
       setReportMarkdown(typeof payload?.report_markdown === 'string' ? payload.report_markdown : null);
@@ -252,7 +283,7 @@ export default function DataAssessmentReport({
         }
       }
 
-      setProgress(90);
+      setProgress(100);
       onComplete({
         result,
         report_markdown: payload?.report_markdown,
@@ -260,13 +291,12 @@ export default function DataAssessmentReport({
         report_files: payload?.report_files,
         transform_suggestions: suggestionsOut,
       });
-    } catch {
+    } catch (err: any) {
       setAssessment(null);
       setReportMarkdown(null);
       setReportHtml(null);
       onComplete(null);
     } finally {
-      setProgress(100);
       setAssessing(false);
     }
   };

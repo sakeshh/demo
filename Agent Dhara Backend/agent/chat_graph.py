@@ -2781,6 +2781,7 @@ def _node_assess_selected_local_files(state: ChatState) -> ChatState:
     # Cache for follow-up DQ questions
     ctx["last_assessment_result"] = result
     ctx["last_assessment_datasets"] = list((result.get("datasets") or {}).keys()) if isinstance(result, dict) else []
+    state["session"]["session_state"] = "assessed"
     return {
         "reply": reply,
         "payload": {
@@ -2843,6 +2844,7 @@ def _node_assess_selected_files(state: ChatState) -> ChatState:
     # Cache for follow-up DQ questions
     ctx["last_assessment_result"] = result
     ctx["last_assessment_datasets"] = list((result.get("datasets") or {}).keys()) if isinstance(result, dict) else []
+    state["session"]["session_state"] = "assessed"
     return {
         "reply": reply,
         "payload": {
@@ -3202,6 +3204,7 @@ def _node_assess_selected_tables(state: ChatState) -> ChatState:
     # Cache for follow-up DQ questions
     ctx["last_assessment_result"] = result
     ctx["last_assessment_datasets"] = list((result.get("datasets") or {}).keys()) if isinstance(result, dict) else []
+    state["session"]["session_state"] = "assessed"
     return {
         "reply": reply,
         "payload": {
@@ -3816,6 +3819,7 @@ def _node_convo_etl_guidance(state: ChatState) -> ChatState:
 
 def _node_build_etl_plan(state: ChatState) -> ChatState:
     from agent.etl_chat_router import chat_build_etl_plan
+    from agent.session_store import load_session
 
     sid = state.get("session_id") or "default"
     args = state.get("action_args") or {}
@@ -3823,11 +3827,13 @@ def _node_build_etl_plan(state: ChatState) -> ChatState:
         sid,
         engine=str(args.get("engine") or "python"),
     )
+    state["session"] = load_session(sid)
     return {"reply": reply, "payload": {"step": "etl", "intent": "build_etl_plan"}}
 
 
 def _node_generate_etl_code(state: ChatState) -> ChatState:
     from agent.etl_chat_router import chat_generate_etl_code
+    from agent.session_store import load_session
 
     sid = state.get("session_id") or "default"
     args = state.get("action_args") or {}
@@ -3836,41 +3842,50 @@ def _node_generate_etl_code(state: ChatState) -> ChatState:
         engine=str(args.get("engine") or "python"),
         sql_dialect=str(args.get("sql_dialect") or "tsql"),
     )
+    state["session"] = load_session(sid)
     return {"reply": reply, "payload": {"step": "etl", "intent": "generate_etl_code"}}
 
 
 def _node_show_etl_plan(state: ChatState) -> ChatState:
     from agent.etl_chat_router import chat_show_etl_plan
+    from agent.session_store import load_session
 
     sid = state.get("session_id") or "default"
     reply = chat_show_etl_plan(sid)
+    state["session"] = load_session(sid)
     return {"reply": reply, "payload": {"step": "etl", "intent": "show_etl_plan"}}
 
 
 def _node_confirm_etl_plan(state: ChatState) -> ChatState:
     from agent.etl_chat_router import chat_confirm_etl_plan
+    from agent.session_store import load_session
 
     sid = state.get("session_id") or "default"
     args = state.get("action_args") or {}
     plan_override = args.get("plan") if isinstance(args.get("plan"), dict) else None
     reply = chat_confirm_etl_plan(sid, plan_override=plan_override)
+    state["session"] = load_session(sid)
     return {"reply": reply, "payload": {"step": "etl", "intent": "confirm_etl_plan"}}
 
 
 def _node_capture_business_rules(state: ChatState) -> ChatState:
     from agent.etl_chat_router import chat_capture_business_rules
+    from agent.session_store import load_session
 
     sid = state.get("session_id") or "default"
     msg = state.get("message") or ""
     reply = chat_capture_business_rules(sid, msg)
+    state["session"] = load_session(sid)
     return {"reply": reply, "payload": {"step": "etl", "intent": "capture_business_rules"}}
 
 
 def _node_download_etl_code(state: ChatState) -> ChatState:
     from agent.etl_chat_router import chat_download_etl_code
+    from agent.session_store import load_session
 
     sid = state.get("session_id") or "default"
     reply = chat_download_etl_code(sid)
+    state["session"] = load_session(sid)
     return {"reply": reply, "payload": {"step": "etl", "intent": "download_etl_code"}}
 
 
