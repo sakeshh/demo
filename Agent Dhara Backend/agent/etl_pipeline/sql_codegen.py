@@ -269,7 +269,11 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
 
     ectx = assessment.get("enriched_etl_context") or {}
     sem_pkg = assessment.get("semantic_context") or {}
-    if isinstance(ectx, dict) and (ectx.get("semantic_overall_confidence") is not None or ectx.get("drift_summary")):
+    if isinstance(ectx, dict) and (
+        ectx.get("semantic_overall_confidence") is not None
+        or ectx.get("drift_summary")
+        or ectx.get("drift_score") is not None
+    ):
         lines.append("-- Governance / readiness context (from latest assessment)")
         if ectx.get("semantic_overall_confidence") is not None:
             lines.append(f"--   semantic_overall_confidence={ectx.get('semantic_overall_confidence')}")
@@ -279,6 +283,8 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
             lines.append(f"--   reconciliation_ok={ectx.get('reconciliation_ok')}")
         if ectx.get("gx_evaluated") is not None:
             lines.append(f"--   gx_evaluated={ectx.get('gx_evaluated')}")
+        if ectx.get("drift_score") is not None:
+            lines.append(f"--   drift_score={ectx.get('drift_score')}")
         lines.append("")
     if isinstance(sem_pkg, dict) and sem_pkg.get("by_dataset"):
         lines.append("-- Key business columns (semantic_context)")

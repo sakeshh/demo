@@ -157,6 +157,23 @@ def compute_etl_readiness(assessment: dict) -> dict:
         })
         score -= 6
 
+    drift_analysis = assessment.get("drift_analysis") or {}
+    try:
+        dscore = float(drift_analysis.get("drift_score") or 100)
+        if dscore < 72:
+            warnings.append(
+                {
+                    "dataset": "global",
+                    "column": "",
+                    "issue": f"Rollup drift score is weak ({dscore:.0f}/100); review drift_analysis in the assessment payload.",
+                    "severity": "MEDIUM",
+                    "fix": "Confirm upstream changes or refresh governed baselines.",
+                }
+            )
+            score -= 4
+    except (TypeError, ValueError):
+        pass
+
     drift_pkg = assessment.get("drift") or {}
     for ds_name, dblock in (drift_pkg.get("by_dataset") or {}).items():
         if not isinstance(dblock, dict):

@@ -745,6 +745,15 @@ def build_markdown_report(result: Dict[str, Any]) -> str:
             )
         md.append("")
 
+    try:
+        from agent.report_governance_sections import render_governance_markdown
+
+        _gm = render_governance_markdown(result)
+        if _gm.strip():
+            md.append(_gm)
+    except Exception:
+        pass
+
     rm = result.get("run_metadata") or {}
     if rm:
         md.append("**Run metadata**")
@@ -1608,6 +1617,13 @@ def build_html_report(result: Dict[str, Any]) -> str:
 """
 
     _report_css = get_report_html_css()
+    governance_html = ""
+    try:
+        from agent.report_governance_sections import render_governance_html
+
+        governance_html = render_governance_html(result) or ""
+    except Exception:
+        governance_html = ""
     return (
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
         "<meta charset=\"utf-8\"/>\n"
@@ -1627,7 +1643,8 @@ def build_html_report(result: Dict[str, Any]) -> str:
   <a href="#overview" class="nav-jump">Overview</a>
   <a href="#datasets" class="nav-jump" data-expand-datasets="1">Datasets</a>
   <a href="#relations" class="nav-jump" data-expand-relations="1">Relations</a>
-  <a href="#globalq" class="nav-jump" data-expand-global="1">Global DQ</a>{nav_llm_link}{nav_fix_link}
+  <a href="#globalq" class="nav-jump" data-expand-global="1">Global DQ</a>
+  <a href="#governance" class="nav-jump">Governance</a>{nav_llm_link}{nav_fix_link}
   <button type="button" class="tool-btn secondary" id="btn-collapse-all">Collapse all</button>
   <button type="button" class="tool-btn" id="btn-expand-all">Expand all</button>
 </nav>
@@ -1650,6 +1667,7 @@ def build_html_report(result: Dict[str, Any]) -> str:
 </div>
 {exec_summary_html}
 </section>
+{governance_html}
 {llm_section_html}
 <section id="datasets" class="datasets-section">
 {datasets_html}

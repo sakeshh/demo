@@ -4,11 +4,22 @@ import pandas as pd
 
 from agent.assessment_governance import enrich_assessment_with_governance
 from agent.cross_field_rules import evaluate_cross_field_rules
+from agent.drift_analyzer import aggregate_drift
 from agent.drift_detector import compare_snapshots
 from agent.metadata_registry import validate_manifest_against_schema
 from agent.profile_snapshot_store import build_profile_fingerprint
 from agent.reconciliation_tracker import build_reconciliation_from_profile
 from agent.semantic_context_builder import build_semantic_context_for_dataset
+
+
+def test_aggregate_drift():
+    agg = aggregate_drift(
+        {
+            "a": {"severity": "medium", "signals": [{"kind": "x"}], "has_baseline": True},
+        }
+    )
+    assert agg["worst_severity"] == "medium"
+    assert agg["total_signal_count"] == 1
 
 
 def test_reconciliation_balanced():
@@ -64,7 +75,8 @@ def test_semantic_context_basic():
     assert "order_id" in ctx["critical_columns"]
 
 
-def test_enrich_assessment_minimal():
+def test_enrich_assessment_minimal(tmp_path, monkeypatch):
+    monkeypatch.setenv("DHARA_MANIFEST_HISTORY_DIR", str(tmp_path))
     df = pd.DataFrame({"x": [1, 2, 3]})
     assess = {
         "datasets": {
@@ -100,6 +112,11 @@ def test_enrich_assessment_minimal():
     }
     out = enrich_assessment_with_governance(assess, {"t": df}, business_rules={})
     assert "semantic_context" in out
+    assert "contract" in (out.get("semantic_context") or {})
     assert "governance" in out
+    gov = out.get("governance") or {}
+    assert "contract_snapshot" in gov
+    assert gov["contract_snapshot"].get("saved") is True
     assert "reconciliation" in out
-    assert "drift" in out
+    assert "drift_analysis" in out
+    assert "reconciliation_analysis" in out

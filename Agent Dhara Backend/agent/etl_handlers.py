@@ -43,6 +43,72 @@ from agent.etl_pipeline.agentic_rules import analyze_agentic_intent
 logger = logging.getLogger("agent.etl")
 
 
+def _collect_etl_preview_datasets(ctx: Dict[str, Any], assess: Dict[str, Any]) -> Dict[str, Any]:
+    """Return dataset name -> DataFrame for optional DuckDB preview (session or assessment)."""
+    import pandas as pd
+
+    out: Dict[str, Any] = {}
+    raw = ctx.get("etl_preview_datasets")
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if isinstance(v, pd.DataFrame):
+                out[str(k)] = v
+    if out:
+        return out
+    ep = assess.get("etl_preview_input") if isinstance(assess, dict) else None
+    if isinstance(ep, dict):
+        d = ep.get("datasets")
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if isinstance(v, pd.DataFrame):
+                    out[str(k)] = v
+    return out
+
+
+def _maybe_build_etl_duckdb_diff(
+    *,
+    eng: str,
+    code: str,
+    ok: bool,
+    ctx: Dict[str, Any],
+    assess: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    After SQL output: optional DuckDB preview + frame diff when preview frames exist.
+
+    Enable with ``DHARA_ETL_DUCKDB_DIFF=1`` and/or ``etl_preview_input.preview_sql`` /
+    ``DHARA_ETL_DUCKDB_PREVIEW_SQL``, or ``DHARA_ETL_DUCKDB_AUTO_EXTRACT=1`` to try the first SELECT.
+    """
+    if eng not in ("sql", "tsql", "ansi"):
+        return None
+    if not ok or not (code or "").strip():
+        return None
+    dfs = _collect_etl_preview_datasets(ctx, assess)
+    if not dfs:
+        return {"skipped": True, "reason": "no_preview_datasets"}
+    env_on = os.getenv("DHARA_ETL_DUCKDB_DIFF", "").strip().lower() in ("1", "true", "yes")
+    auto_ex = os.getenv("DHARA_ETL_DUCKDB_AUTO_EXTRACT", "").strip().lower() in ("1", "true", "yes")
+    ep = assess.get("etl_preview_input") if isinstance(assess, dict) else {}
+    ep = ep if isinstance(ep, dict) else {}
+    preview_sql = str(ep.get("preview_sql") or os.getenv("DHARA_ETL_DUCKDB_PREVIEW_SQL", "") or "").strip()
+    if not (env_on or preview_sql or auto_ex):
+        return {"skipped": True, "reason": "duckdb_diff_not_enabled"}
+    from agent.etl_preview_wiring import build_duckdb_sql_preview_diff
+
+    before_ds = ep.get("before_dataset_name")
+    before_ds_s = str(before_ds).strip() if before_ds else None
+    try:
+        return build_duckdb_sql_preview_diff(
+            code,
+            dfs,
+            preview_sql=preview_sql or None,
+            before_dataset_name=before_ds_s,
+        )
+    except Exception as exc:
+        logger.warning("etl duckdb preview/diff failed: %s", exc)
+        return {"skipped": True, "reason": str(exc)[:300]}
+
+
 def _resolve_codegen_mode(
     engine: str,
     *,
@@ -899,19 +965,23 @@ def etl_generate_code(
     else:
         rollback_on_failure(flow, reason=f"validation_failed: {(errs or ['unknown'])[:3]}")
     latency_ms = (time.time() - t_gen) * 1000
-    flow.update(
-        {
-            "code": code,
-            "target_engine": eng,
-            "validation_ok": ok,
-            "validation_errors": errs or [],
-            "generated_by": generated_by,
-            "artifact_rel_path": rel,
-            "is_draft": not ok,
-            "artifact_version": version,
-            "last_generate_latency_ms": round(latency_ms, 1),
-        }
-    )
+    duckdb_diff: Optional[Dict[str, Any]] = None
+    if eng in ("sql", "tsql", "ansi"):
+        duckdb_diff = _maybe_build_etl_duckdb_diff(eng=eng, code=code, ok=ok, ctx=ctx, assess=assess)
+    flow_update: Dict[str, Any] = {
+        "code": code,
+        "target_engine": eng,
+        "validation_ok": ok,
+        "validation_errors": errs or [],
+        "generated_by": generated_by,
+        "artifact_rel_path": rel,
+        "is_draft": not ok,
+        "artifact_version": version,
+        "last_generate_latency_ms": round(latency_ms, 1),
+    }
+    if duckdb_diff is not None:
+        flow_update["duckdb_diff"] = duckdb_diff
+    flow.update(flow_update)
     save_session(sess)
 
     logger.info(
@@ -945,6 +1015,7 @@ def etl_generate_code(
             if ok
             else "Code generated as draft — fix validation_errors before production deploy."
         ),
+        "duckdb_diff": flow.get("duckdb_diff"),
     }
 
 

@@ -162,4 +162,7 @@ def build_all_semantic_contexts(
         )
     agg = [v.get("semantic_confidence", 0.0) for v in out.values()]
     overall = round(sum(agg) / max(len(agg), 1), 3) if agg else 0.0
-    return {"by_dataset": out, "overall_semantic_confidence": overall}
+    payload = {"by_dataset": out, "overall_semantic_confidence": overall}
+    from agent.semantic_context import attach_contract_to_semantic_payload
+
+    return attach_contract_to_semantic_payload(payload)

@@ -80,3 +80,28 @@ def run_relationship_checks(
                 }
             )
     return row_issues, warnings
+
+
+def relationship_issue_key(item: Dict[str, Any]) -> tuple:
+    return (
+        str(item.get("dataset") or ""),
+        str(item.get("column") or ""),
+        str(item.get("related_dataset") or ""),
+        str(item.get("related_column") or ""),
+    )
+
+
+def merge_supplemental_relationship_issues(
+    existing: List[Any],
+    new: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = [x for x in existing if isinstance(x, dict)]
+    keys = {relationship_issue_key(x) for x in merged}
+    for item in new:
+        if not isinstance(item, dict):
+            continue
+        k = relationship_issue_key(item)
+        if k not in keys:
+            merged.append(item)
+            keys.add(k)
+    return merged

@@ -614,6 +614,59 @@ def _build_report_tables_markdown(result: Dict[str, Any]) -> str:
             )
         parts.append("| Dataset | Severity | #Signals |\n|---|---:|---:|\n" + ("\n".join(drows) if drows else "|  |  |  |"))
 
+    da = (result.get("drift_analysis") or {}) if isinstance(result, dict) else {}
+    if isinstance(da, dict) and da.get("per_dataset"):
+        parts.append("### Drift analysis (rollup)")
+        parts.append(
+            f"- **Drift score:** `{_md_escape(da.get('drift_score'))}` · **worst:** `{_md_escape(da.get('worst_severity'))}` · **signals:** `{_md_escape(da.get('total_signal_count'))}`"
+        )
+
+    ra = (result.get("reconciliation_analysis") or {}) if isinstance(result, dict) else {}
+    rbd = ra.get("by_dataset") or {}
+    if isinstance(rbd, dict) and rbd:
+        parts.append("### Reconciliation analysis (deltas)")
+        for dn, block in rbd.items():
+            if not isinstance(block, dict):
+                continue
+            d = block.get("deltas") or {}
+            parts.append(
+                f"- `{_md_escape(dn)}`: parsed_loss={_md_escape(d.get('source_to_parsed_loss'))}, "
+                f"write_delta={_md_escape(d.get('parsed_to_written_loss'))}"
+            )
+
+    gi = ((result.get("data_quality_issues") or {}).get("global_issues") or {}) if isinstance(result, dict) else {}
+    sup = gi.get("relationship_row_issues_supplemental") or []
+    if isinstance(sup, list) and sup:
+        parts.append("### Relationship integrity (supplemental)")
+        for it in sup[:12]:
+            if not isinstance(it, dict):
+                continue
+            parts.append(
+                f"- `{_md_escape(it.get('dataset'))}`.{_md_escape(it.get('column'))} → "
+                f"`{_md_escape(it.get('related_dataset'))}`.{_md_escape(it.get('related_column'))} — count={_md_escape(it.get('count'))}"
+            )
+
+    dp = result.get("duckdb_preview") if isinstance(result, dict) else None
+    if isinstance(dp, dict) and dp.get("ok"):
+        parts.append("### Preview diff (DuckDB)")
+        parts.append(
+            f"- Materialized **{_md_escape(dp.get('rowcount_sample'))}** preview rows (**{_md_escape(dp.get('rowcount_full'))}** total in result)."
+        )
+        cols = dp.get("columns") or []
+        if cols:
+            parts.append(f"- Output columns: {', '.join(_md_escape(c) for c in cols[:24])}")
+
+    amb = (result.get("semantic_ambiguity") or {}) if isinstance(result, dict) else {}
+    amb_cols = amb.get("columns") or []
+    if amb_cols:
+        parts.append("### Unresolved ambiguity (low type confidence)")
+        for row in amb_cols[:12]:
+            if isinstance(row, dict):
+                parts.append(
+                    f"- `{_md_escape(row.get('dataset'))}`.`{_md_escape(row.get('column'))}` — "
+                    f"type_confidence={_md_escape(row.get('type_confidence'))}"
+                )
+
     rec = (result.get("reconciliation") or {}).get("by_dataset") or {}
     if isinstance(rec, dict) and rec:
         parts.append("### Data movement audit (reconciliation)")

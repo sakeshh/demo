@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from agent.cross_field_rules import evaluate_cross_field_rules, load_cross_field_rules
+from agent.drift_analyzer import aggregate_drift
 from agent.drift_detector import compare_snapshots
 from agent.gx_issue_mapper import map_gx_to_unified_issues
 from agent.metadata_registry import (
@@ -20,10 +21,52 @@ from agent.metadata_registry import (
 )
 from agent.profile_snapshot_store import build_profile_fingerprint, load_latest_snapshot, save_snapshot
 from agent.raw_payload_registry import empty_registry
+from agent.reconciliation_analyzer import analyze_reconciliation_bundle
 from agent.reconciliation_tracker import build_reconciliation_from_profile, merge_reconciliations
 from agent.semantic_context_builder import build_all_semantic_contexts
 
 logger = logging.getLogger(__name__)
+
+
+def _collect_semantic_ambiguity(assessment: Dict[str, Any]) -> Dict[str, Any]:
+    rows: List[Dict[str, Any]] = []
+    for ds_name, ds_meta in (assessment.get("datasets") or {}).items():
+        if not isinstance(ds_meta, dict):
+            continue
+        for cname, col in (ds_meta.get("columns") or {}).items():
+            if not isinstance(col, dict):
+                continue
+            tc = col.get("type_confidence")
+            if isinstance(tc, (int, float)) and float(tc) < 0.72:
+                rows.append({"dataset": str(ds_name), "column": str(cname), "type_confidence": float(tc)})
+    return {"columns": rows[:50]}
+
+
+def _attach_join_hints(assessment: Dict[str, Any]) -> None:
+    rels = assessment.get("relationships") or []
+    for ds_name, ds_meta in (assessment.get("datasets") or {}).items():
+        if not isinstance(ds_meta, dict):
+            continue
+        hints: List[Dict[str, Any]] = []
+        for r in rels:
+            if not isinstance(r, dict):
+                continue
+            if str(r.get("dataset_a")) == str(ds_name):
+                hints.append(
+                    {
+                        "with_dataset": r.get("dataset_b"),
+                        "join_columns": [(r.get("column_a"), r.get("column_b"))],
+                    }
+                )
+            elif str(r.get("dataset_b")) == str(ds_name):
+                hints.append(
+                    {
+                        "with_dataset": r.get("dataset_a"),
+                        "join_columns": [(r.get("column_b"), r.get("column_a"))],
+                    }
+                )
+        if hints:
+            ds_meta["join_hints"] = hints[:30]
 
 
 def _schema_hash(assessment: Dict[str, Any]) -> str:
@@ -108,6 +151,35 @@ def enrich_assessment_with_governance(
         prior_hints=prior if isinstance(prior, dict) else None,
     )
     assessment["semantic_context"] = sem_pkg
+    assessment["semantic_ambiguity"] = _collect_semantic_ambiguity(assessment)
+    _attach_join_hints(assessment)
+
+    to_archive: Optional[Dict[str, Any]] = None
+    if isinstance(sem_pkg, dict):
+        c0 = sem_pkg.get("contract")
+        if isinstance(c0, dict) and c0:
+            to_archive = c0
+        elif sem_pkg.get("by_dataset"):
+            to_archive = {
+                "overall_semantic_confidence": sem_pkg.get("overall_semantic_confidence"),
+                "by_dataset": sem_pkg.get("by_dataset"),
+            }
+    if to_archive:
+        try:
+            from agent.manifest_version_store import save_contract_snapshot
+
+            rid = str(job_id or gov.get("run_timestamp") or "run").strip()
+            snap = save_contract_snapshot(
+                rid,
+                to_archive,
+                schema_hash=schema_h,
+                storage_path=os.getenv("DHARA_MANIFEST_HISTORY_DIR") or None,
+            )
+            gov["contract_snapshot"] = snap
+            if snap.get("warning"):
+                gov["contract_snapshot_warning"] = str(snap["warning"])[:500]
+        except Exception as ex:
+            gov["contract_snapshot_warning"] = str(ex)[:500]
 
     # Per-dataset manifest errors
     for ds_name, ds_meta in (assessment.get("datasets") or {}).items():
@@ -161,6 +233,8 @@ def enrich_assessment_with_governance(
 
     assessment["reconciliation"] = merge_reconciliations(recon_items)
     assessment["drift"] = {"by_dataset": drift_by}
+    assessment["drift_analysis"] = aggregate_drift(drift_by)
+    assessment["reconciliation_analysis"] = analyze_reconciliation_bundle(assessment.get("reconciliation"))
 
     # Cross-field rules
     rules = load_cross_field_rules()
@@ -179,15 +253,53 @@ def enrich_assessment_with_governance(
         summ["medium_severity"] = sum(1 for i in block["issues"] if str(i.get("severity")).lower() == "medium")
         summ["low_severity"] = sum(1 for i in block["issues"] if str(i.get("severity")).lower() == "low")
 
+    # Supplemental relationship checks (SQL-style anti-joins on loaded frames)
+    if os.getenv("DHARA_RUN_REL_CHECKS", "").strip().lower() in ("1", "true", "yes") and len(datasets) >= 2:
+        from agent.relationship_checker import (
+            merge_supplemental_relationship_issues,
+            relationship_issue_key,
+            run_relationship_checks,
+        )
+
+        rels = assessment.get("relationships") or []
+        new_issues, _w = run_relationship_checks(datasets, rels)
+        gi = assessment.setdefault("data_quality_issues", {}).setdefault("global_issues", {})
+        ex = gi.get("relationship_row_issues")
+        if not isinstance(ex, list):
+            ex = []
+        old_keys = {relationship_issue_key(y) for y in ex if isinstance(y, dict)}
+        merged = merge_supplemental_relationship_issues(ex, new_issues)
+        gi["relationship_row_issues"] = merged
+        gi["relationship_row_issues_supplemental"] = [
+            x for x in merged if isinstance(x, dict) and relationship_issue_key(x) not in old_keys
+        ]
+
+    preview_sql = str((business_rules or {}).get("duck_preview_sql") or os.getenv("DHARA_DUCKDB_PREVIEW_SQL", "") or "").strip()
+    if preview_sql and datasets:
+        try:
+            from agent.duckdb_preview_runner import preview_generated_sql_against_assessment
+
+            assessment["duckdb_preview"] = preview_generated_sql_against_assessment(preview_sql, datasets)
+        except Exception as e:
+            logger.warning("duckdb preview failed: %s", e)
+            assessment["duckdb_preview"] = {"ok": False, "error": str(e)}
+
+    try:
+        from agent.gx_suite_builder import list_expectation_descriptors_from_assessment
+
+        assessment["gx_expectation_descriptors"] = list_expectation_descriptors_from_assessment(assessment)
+    except Exception:
+        pass
+
     # Optional GX
     if run_gx is None:
         run_gx = os.getenv("DHARA_RUN_GX", "").strip().lower() in ("1", "true", "yes")
     gx_results: Dict[str, Any] = {}
     if run_gx and datasets:
         try:
-            from agent.specialists.gx_validation_specialist import run_gx_validation
+            from agent.gx_runner import run_suite
 
-            gx_results = run_gx_validation(datasets, assessment) or {}
+            gx_results = run_suite(datasets, assessment) or {}
         except Exception as e:
             logger.warning("GX run skipped: %s", e)
             gx_results = {"_error": str(e)}
@@ -209,6 +321,7 @@ def enrich_assessment_with_governance(
             {
                 "semantic_overall_confidence": sem_pkg.get("overall_semantic_confidence"),
                 "drift_summary": {k: v.get("severity") for k, v in drift_by.items() if isinstance(v, dict)},
+                "drift_score": (assessment.get("drift_analysis") or {}).get("drift_score"),
                 "reconciliation_ok": all(
                     (r.get("balanced") is not False) for r in (assessment.get("reconciliation") or {}).get("by_dataset", {}).values()
                 ),
