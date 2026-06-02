@@ -1,0 +1,6 @@
+# Thresholds for drift severity (relative deltas unless noted).
+version: "1.0"
+row_count_relative: 0.15
+null_rate_absolute: 0.08
+distinct_count_relative: 0.25
+schema_change_severity: high

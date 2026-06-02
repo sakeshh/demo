@@ -845,11 +845,17 @@ def profile_dataframe(
 
         raw_smp = s.dropna().head(20).astype(str).tolist()
 
+        null_pct = float(s.isna().mean())
+        null_count = int(s.isna().sum())
+        type_confidence = 0.92 if hint else (0.78 if _is_text_dtype(dtype_str) else 0.95)
+
         col_profile = {
             "dtype": dtype_str,
             "dtype_inference": hint,
             "type_distribution": type_dist,
-            "null_percentage": float(s.isna().mean()),
+            "null_percentage": null_pct,
+            "null_count": null_count,
+            "type_confidence": round(type_confidence, 3),
             "unique_count": safe_nunique(s),
             "semantic_type": semantic,
             "candidate_primary_key": safe_is_unique(s),
@@ -4293,5 +4299,17 @@ def load_and_profile(
             update_job_progress(job_id, 100)
         except Exception:
             pass
+
+    try:
+        from agent.assessment_governance import enrich_assessment_with_governance
+
+        out = enrich_assessment_with_governance(
+            out,
+            datasets,
+            job_id=job_id,
+            business_rules=business_rules,
+        )
+    except Exception as e:
+        logger.warning("governance enrichment failed: %s", e)
 
     return out

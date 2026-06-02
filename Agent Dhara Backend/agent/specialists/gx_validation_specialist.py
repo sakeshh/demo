@@ -177,6 +177,14 @@ def run_gx_validation(datasets: Dict[str, pd.DataFrame], profile_results: Dict[s
                             validator.expect_column_values_to_match_regex(column=col_name, regex=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
                         elif semantic_type == "phone":
                             validator.expect_column_values_to_match_regex(column=col_name, regex=r"^[+()\-\.\s0-9]{7,}$")
+                        elif semantic_type in ("uuid", "guid"):
+                            try:
+                                validator.expect_column_values_to_match_regex(
+                                    column=col_name,
+                                    regex=r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+                                )
+                            except Exception:
+                                pass
                     
                     # 6. Dates
                     if semantic_type == "date":

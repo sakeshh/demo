@@ -141,6 +141,77 @@ def compute_etl_readiness(assessment: dict) -> dict:
             })
             score -= 15
 
+    # Governance: semantic confidence, drift, reconciliation, cross-table style signals
+    sem_pkg = assessment.get("semantic_context") or {}
+    try:
+        overall_conf = float(sem_pkg.get("overall_semantic_confidence") or 1.0)
+    except (TypeError, ValueError):
+        overall_conf = 1.0
+    if overall_conf < 0.55:
+        warnings.append({
+            "dataset": "global",
+            "column": "",
+            "issue": f"Low overall semantic confidence ({overall_conf:.2f}); validate glossary/metadata manifest.",
+            "severity": "MEDIUM",
+            "fix": "Provide business notes or config/metadata_manifest.yaml for critical columns.",
+        })
+        score -= 6
+
+    drift_pkg = assessment.get("drift") or {}
+    for ds_name, dblock in (drift_pkg.get("by_dataset") or {}).items():
+        if not isinstance(dblock, dict):
+            continue
+        sev = str(dblock.get("severity") or "").lower()
+        if sev == "high":
+            warnings.append({
+                "dataset": str(ds_name),
+                "column": "",
+                "issue": "High drift vs last profile snapshot (row/schema/null/distinct shifts).",
+                "severity": "MEDIUM",
+                "fix": "Compare with prior baseline; confirm upstream changes are expected.",
+            })
+            score -= 10
+        elif sev == "medium":
+            warnings.append({
+                "dataset": str(ds_name),
+                "column": "",
+                "issue": "Moderate drift detected vs last profile snapshot.",
+                "severity": "MEDIUM",
+                "fix": "Review drift signals in the governance section of the report.",
+            })
+            score -= 5
+
+    rec_pkg = assessment.get("reconciliation") or {}
+    for ds_name, rec in (rec_pkg.get("by_dataset") or {}).items():
+        if isinstance(rec, dict) and rec.get("balanced") is False:
+            blockers.append({
+                "dataset": str(ds_name),
+                "column": "",
+                "issue": "Reconciliation stages do not balance (possible row loss or skipped parsing).",
+                "severity": "HIGH",
+                "issue_type": "reconciliation_imbalance",
+                "fix": "Inspect parse failures and filtered counts; align source-to-target accounting.",
+            })
+            score -= 12
+
+    for u in assessment.get("unified_issues") or []:
+        if not isinstance(u, dict):
+            continue
+        if u.get("source") != "gx":
+            continue
+        if str(u.get("business_criticality") or "").lower() != "high":
+            continue
+        msg = str(u.get("message") or "GX validation failure")
+        if not any(w.get("issue") == msg for w in warnings):
+            warnings.append({
+                "dataset": str(u.get("dataset") or ""),
+                "column": str(u.get("column") or ""),
+                "issue": msg,
+                "severity": "MEDIUM",
+                "fix": "Review GX expectation failures on business-critical columns.",
+            })
+            score -= 4
+
     return {
         "score": max(0, score),
         "grade": "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 50 else "F",

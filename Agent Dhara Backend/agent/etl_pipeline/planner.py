@@ -471,6 +471,27 @@ def build_etl_plan(
                 sem_schema[key]["inferred_by"] = "user_override"
                 sem_schema[key]["confidence"] = 1.0
 
+    # Layer 3b: Governance semantic_context (manifest / glossary hints)
+    sem_ctx_pkg = assessment.get("semantic_context") or {}
+    for ds_name, ctx in (sem_ctx_pkg.get("by_dataset") or {}).items():
+        if not isinstance(ctx, dict):
+            continue
+        base_conf = float(ctx.get("semantic_confidence") or 0.75)
+        for col_name, term in (ctx.get("business_terms") or {}).items():
+            key = f"{ds_name}.{col_name}"
+            desc = {
+                "semantic_type": "string",
+                "sub_type": "",
+                "confidence": min(0.98, base_conf + 0.05),
+                "inferred_by": "governance_semantic_context",
+                "description": str(term)[:500],
+            }
+            if key not in sem_schema:
+                sem_schema[key] = SemanticDescriptor(desc)
+            elif float(sem_schema[key].get("confidence") or 0) < 0.82:
+                sem_schema[key]["description"] = str(term)[:500]
+                sem_schema[key]["inferred_by"] = "governance_semantic_context"
+
     sug_pkg = suggest_transformations(assessment)
     suggestions: List[Dict[str, Any]] = list(sug_pkg.get("suggested_transformations") or [])
     if source_context and "suggestions" in source_context:

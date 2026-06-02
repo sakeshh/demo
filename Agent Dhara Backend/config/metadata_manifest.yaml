@@ -1,0 +1,4 @@
+# Optional governed metadata per dataset. Keys match dataset names (substring match supported in code).
+# See agent/metadata_registry.py for schema.
+version: "1.0"
+datasets: {}

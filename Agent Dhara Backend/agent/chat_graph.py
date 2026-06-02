@@ -582,6 +582,85 @@ def _build_report_tables_markdown(result: Dict[str, Any]) -> str:
         else:
             parts.append("#### Relationship warnings\n\n- (none)")
 
+    # --- Governance extensions (semantic, drift, reconciliation, GX summary) ---
+    sem = (result.get("semantic_context") or {}) if isinstance(result, dict) else {}
+    if isinstance(sem, dict) and sem.get("by_dataset"):
+        parts.append("### Semantic summary")
+        parts.append("| Metric | Value |\n|---|---|")
+        parts.append(f"| Overall semantic confidence | `{_md_escape(sem.get('overall_semantic_confidence'))}` |")
+        for ds_name, ctx in (sem.get("by_dataset") or {}).items():
+            if not isinstance(ctx, dict):
+                continue
+            crit = ", ".join(f"`{_md_escape(c)}`" for c in (ctx.get("critical_columns") or [])[:12])
+            keys = ", ".join(f"`{_md_escape(c)}`" for c in (ctx.get("likely_key_columns") or [])[:8])
+            parts.append(f"#### `{_md_escape(ds_name)}`")
+            parts.append(f"- **Critical columns:** {crit or '_(none)_'}")
+            parts.append(f"- **Likely keys:** {keys or '_(none)_'}")
+            terms = ctx.get("business_terms") or {}
+            if isinstance(terms, dict) and terms:
+                tlines = [f"| `{_md_escape(k)}` | {_md_escape(v)} |" for k, v in list(terms.items())[:20]]
+                parts.append("| Column | Business term |\n|---|---|\n" + "\n".join(tlines))
+
+    drift = (result.get("drift") or {}).get("by_dataset") or {}
+    if isinstance(drift, dict) and drift:
+        parts.append("### Drift summary (vs last snapshot)")
+        drows = []
+        for dn, dblock in drift.items():
+            if not isinstance(dblock, dict):
+                continue
+            sigs = dblock.get("signals") or []
+            drows.append(
+                f"| `{_md_escape(dn)}` | {_md_escape(dblock.get('severity'))} | {len(sigs) if isinstance(sigs, list) else 0} |"
+            )
+        parts.append("| Dataset | Severity | #Signals |\n|---|---:|---:|\n" + ("\n".join(drows) if drows else "|  |  |  |"))
+
+    rec = (result.get("reconciliation") or {}).get("by_dataset") or {}
+    if isinstance(rec, dict) and rec:
+        parts.append("### Data movement audit (reconciliation)")
+        rrows = []
+        for dn, rb in rec.items():
+            if not isinstance(rb, dict):
+                continue
+            st = rb.get("stages") or {}
+            bal = rb.get("balanced")
+            rrows.append(
+                f"| `{_md_escape(dn)}` | {st.get('source', '')} | {st.get('parsed', '')} | {st.get('written', '')} | {_md_escape(bal)} |"
+            )
+        parts.append(
+            "| Dataset | source | parsed | written | balanced |\n|---|---:|---:|---:|:---:|\n"
+            + ("\n".join(rrows) if rrows else "|  |  |  |  |  |")
+        )
+
+    gx = result.get("gx_results") if isinstance(result, dict) else None
+    if isinstance(gx, dict) and gx and "_error" not in gx:
+        parts.append("### GX validation summary")
+        grows = []
+        for gn, gb in gx.items():
+            if str(gn).startswith("_") or not isinstance(gb, dict):
+                continue
+            stats = gb.get("statistics") or {}
+            grows.append(
+                f"| `{_md_escape(gn)}` | {_md_escape(gb.get('success'))} | "
+                f"{stats.get('successful_expectations', '')} / {stats.get('evaluated_expectations', '')} |"
+            )
+        parts.append("| Dataset | success | successful / evaluated |\n|---|---|---|\n" + ("\n".join(grows) if grows else "|  |  |  |"))
+
+    etl_ready = result.get("etl_readiness") if isinstance(result, dict) else None
+    if isinstance(etl_ready, dict):
+        parts.append("### ETL readiness")
+        parts.append(
+            f"- **Score:** {etl_ready.get('score')} ({etl_ready.get('grade')})\n"
+            f"- **Recommendation:** {_md_escape(etl_ready.get('etl_recommendation'))}"
+        )
+
+    parts.append("### What might still be missed")
+    parts.append(
+        "- Unmodelled business rules not captured in metadata manifest or cross-field rules.\n"
+        "- Drift in tails of distributions when only moments/null/distinct are snapshotted.\n"
+        "- Nested payload loss if raw JSON/XML is flattened without registry entries.\n"
+        "- GX expectations are sampled on very large tables (see GX logs)."
+    )
+
     return "\n\n".join([p for p in parts if p.strip()])
 
 

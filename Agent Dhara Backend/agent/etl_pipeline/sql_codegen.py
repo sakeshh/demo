@@ -267,6 +267,29 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
             lines.append(f"--   [{ds}] {col}: {msg}")
         lines.append("")
 
+    ectx = assessment.get("enriched_etl_context") or {}
+    sem_pkg = assessment.get("semantic_context") or {}
+    if isinstance(ectx, dict) and (ectx.get("semantic_overall_confidence") is not None or ectx.get("drift_summary")):
+        lines.append("-- Governance / readiness context (from latest assessment)")
+        if ectx.get("semantic_overall_confidence") is not None:
+            lines.append(f"--   semantic_overall_confidence={ectx.get('semantic_overall_confidence')}")
+        if ectx.get("drift_summary"):
+            lines.append(f"--   drift_severity_by_dataset={ectx.get('drift_summary')}")
+        if ectx.get("reconciliation_ok") is not None:
+            lines.append(f"--   reconciliation_ok={ectx.get('reconciliation_ok')}")
+        if ectx.get("gx_evaluated") is not None:
+            lines.append(f"--   gx_evaluated={ectx.get('gx_evaluated')}")
+        lines.append("")
+    if isinstance(sem_pkg, dict) and sem_pkg.get("by_dataset"):
+        lines.append("-- Key business columns (semantic_context)")
+        for ds_name, ctx in list((sem_pkg.get("by_dataset") or {}).items())[:12]:
+            if not isinstance(ctx, dict):
+                continue
+            crit = ", ".join(str(c) for c in (ctx.get("critical_columns") or [])[:8])
+            if crit:
+                lines.append(f"--   [{ds_name}] critical: {crit}")
+        lines.append("")
+
     ds_plan = plan.get("datasets") or {}
 
     # Emit logging table definition for T-SQL dialect

@@ -1,0 +1,10 @@
+# Declarative cross-column rules (see agent/cross_field_rules.py).
+# Example (uncomment and edit):
+# rules:
+#   - dataset: "*"
+#     type: date_order
+#     start_column: start_date
+#     end_column: end_date
+#     severity: high
+version: "1.0"
+rules: []
