@@ -4,7 +4,7 @@
 -- Grade: A
 -- No issues detected. Fully production ready!
 -- ============================================================
--- ETL SQL — Agent Dhara — plan_id=plan_1780424676
+-- ETL SQL — Agent Dhara — plan_id=plan_1780468191
 -- dialect=tsql — review before executing against production.
 
 -- ⚠ 1 item(s) flagged for manual review before production run.
@@ -185,7 +185,7 @@ AS BEGIN
         DELETE FROM #json_Staging WHERE [id] IS NULL;
 
         -- Nullify invalid email format for optional column [email]
-        UPDATE #json_Staging SET [email] = NULL WHERE [email] IS NOT NULL AND NOT (CAST([email] AS NVARCHAR(MAX)) LIKE '%_@_%._%');
+        UPDATE #json_Staging SET [email] = NULL WHERE [email] IS NOT NULL AND (NOT (CAST([email] AS NVARCHAR(MAX)) LIKE '%_@_%._%') OR CAST([email] AS NVARCHAR(MAX)) LIKE '%@%@%');
 
         -- Nullify invalid phone format for optional column [phone]
         UPDATE #json_Staging SET [phone] = NULL WHERE [phone] IS NOT NULL AND (LEN(REPLACE(REPLACE(REPLACE(REPLACE(CAST([phone] AS NVARCHAR(200)), N'-', N''), N' ', N''), N'(', N''), N')', N'')) < 7 OR REPLACE(REPLACE(REPLACE(REPLACE(CAST([phone] AS NVARCHAR(200)), N'-', N''), N' ', N''), N'(', N''), N')', N'') LIKE '%[^0-9]%');
@@ -443,7 +443,7 @@ AS BEGIN
         DELETE FROM #xml_Staging WHERE [id] IS NULL;
 
         -- Nullify invalid email format for optional column [email]
-        UPDATE #xml_Staging SET [email] = NULL WHERE [email] IS NOT NULL AND NOT (CAST([email] AS NVARCHAR(MAX)) LIKE '%_@_%._%');
+        UPDATE #xml_Staging SET [email] = NULL WHERE [email] IS NOT NULL AND (NOT (CAST([email] AS NVARCHAR(MAX)) LIKE '%_@_%._%') OR CAST([email] AS NVARCHAR(MAX)) LIKE '%@%@%');
 
         -- Nullify invalid phone format for optional column [phone]
         UPDATE #xml_Staging SET [phone] = NULL WHERE [phone] IS NOT NULL AND (LEN(REPLACE(REPLACE(REPLACE(REPLACE(CAST([phone] AS NVARCHAR(200)), N'-', N''), N' ', N''), N'(', N''), N')', N'')) < 7 OR REPLACE(REPLACE(REPLACE(REPLACE(CAST([phone] AS NVARCHAR(200)), N'-', N''), N' ', N''), N'(', N''), N')', N'') LIKE '%[^0-9]%');

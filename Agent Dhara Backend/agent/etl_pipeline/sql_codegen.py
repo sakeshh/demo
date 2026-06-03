@@ -1085,13 +1085,13 @@ def generate_sql_etl(plan: Dict[str, Any], assessment: Dict[str, Any], *, dialec
                             step_lines.append(f"       (SELECT r.* FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),")
                             step_lines.append(f"       'Column [{col}] with value ' + CAST(r.{c} AS NVARCHAR(MAX)) + ' is not a valid email format'")
                             step_lines.append(f"FROM {tbl_staging} r")
-                            step_lines.append(f"WHERE r.{c} IS NOT NULL AND NOT (CAST(r.{c} AS NVARCHAR(MAX)) LIKE '%_@_%._%');")
+                            step_lines.append(f"WHERE r.{c} IS NOT NULL AND (NOT (CAST(r.{c} AS NVARCHAR(MAX)) LIKE '%_@_%._%') OR CAST(r.{c} AS NVARCHAR(MAX)) LIKE '%@%@%');")
                             step_lines.append(f"")
-                            step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c} IS NOT NULL AND NOT (CAST({c} AS NVARCHAR(MAX)) LIKE '%_@_%._%');")
+                            step_lines.append(f"DELETE FROM {tbl_staging} WHERE {c} IS NOT NULL AND (NOT (CAST({c} AS NVARCHAR(MAX)) LIKE '%_@_%._%') OR CAST({c} AS NVARCHAR(MAX)) LIKE '%@%@%');")
                             step_lines.append(f"")
                         else:
                             step_lines.append(f"-- Nullify invalid email format for optional column [{col}]")
-                            step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND NOT (CAST({c} AS NVARCHAR(MAX)) LIKE '%_@_%._%');")
+                            step_lines.append(f"UPDATE {tbl_staging} SET {c} = NULL WHERE {c} IS NOT NULL AND (NOT (CAST({c} AS NVARCHAR(MAX)) LIKE '%_@_%._%') OR CAST({c} AS NVARCHAR(MAX)) LIKE '%@%@%');")
                             step_lines.append(f"")
                 elif action == "normalize_phone":
                     if dialect == "tsql":

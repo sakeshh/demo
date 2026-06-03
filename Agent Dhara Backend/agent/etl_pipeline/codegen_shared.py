@@ -90,7 +90,7 @@ def get_sql_cast_type(col_type: Optional[str], col_name: str) -> str:
         return "NVARCHAR(255)"
     if col_lower == "phone":
         return "NVARCHAR(50)"
-    if any(x in col_lower for x in ("name", "city", "status", "state", "country", "zip", "postal", "category")):
+    if any(x in col_lower for x in ("name", "city", "status", "state", "country", "zip", "postal", "category", "id", "key", "code", "num")):
         return "NVARCHAR(255)"
 
     return "NVARCHAR(MAX)"

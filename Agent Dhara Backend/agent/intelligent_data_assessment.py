@@ -661,6 +661,7 @@ def profile_database_table_full(
         return {}
         
     total_rows = int(row_data.get("__total_rows__", 0))
+    schema_map = {col["name"].lower(): col for col in schema if "name" in col}
     db_profile = {
         "row_count": total_rows,
         "columns": {}
@@ -671,6 +672,7 @@ def profile_database_table_full(
         distinct_cnt = row_data.get(f"{col_name}__distinct_cnt")
         min_val = row_data.get(f"{col_name}__min_val")
         max_val = row_data.get(f"{col_name}__max_val")
+        col_schema = schema_map.get(col_name.lower()) or {}
         
         try:
             null_cnt = int(null_cnt) if null_cnt is not None else 0
@@ -691,7 +693,8 @@ def profile_database_table_full(
             "unique_count": distinct_cnt,
             "min": min_val,
             "max": max_val,
-            "candidate_primary_key": is_cpk
+            "candidate_primary_key": is_cpk,
+            "nullable": col_schema.get("nullable", "YES")
         }
         
     return db_profile
@@ -1893,6 +1896,7 @@ def analyze_column(
     semantic: str,
     thresholds: Optional[Dict[str, Any]] = None,
     is_priority: bool = True,
+    non_nullable: Optional[set[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Per-column data quality checks (uses thresholds when provided).
@@ -1935,6 +1939,10 @@ def analyze_column(
     s_stripped = s_working.map(_strip)
     is_phone_col = isinstance(col, str) and any(p in col.lower() for p in ["phone", "mobile", "contact"])
 
+    is_required = False
+    if non_nullable is not None:
+        is_required = str(col).lower() in non_nullable
+
     # null/placeholder
     null_like_mask = s_stripped.isna() | s_stripped.astype(object).map(
         lambda v: isinstance(v, str) and v.lower() in local_placeholders
@@ -1942,7 +1950,11 @@ def analyze_column(
     null_cnt = int(null_like_mask.sum())
     if null_cnt > 0:
         ratio = null_cnt / max(working_n, 1)
-        sev_str = "high" if ratio > null_pct_high else ("medium" if ratio > null_pct_medium else "low")
+        if is_required:
+            sev_str = "high" if ratio > null_pct_high else ("medium" if ratio > null_pct_medium else "low")
+        else:
+            # Optional column: nulls are expected/allowed, so flag as LOW severity
+            sev_str = "low"
         rows = s.index[null_like_mask].tolist()
         issues.append(dq_issue(sev_str, "nulls", f"{null_cnt} null/placeholder", column=col,
                                count=null_cnt, rows=rows, sample=list(s[null_like_mask].head(5))))
@@ -3462,6 +3474,20 @@ def analyze_dataset_quality(
     # Read priority columns from profile or select them on the fly
     priority_cols = set(profile.get("priority_columns") or list(df.columns))
 
+    # Build set of non-nullable columns based on business rules, database schema, or PK status
+    non_nullable_set = set()
+    if business_rules:
+        nn_list = business_rules.get("non_nullable") or []
+        req_list = business_rules.get("required_columns") or []
+        for c in nn_list:
+            non_nullable_set.add(str(c).lower())
+        for c in req_list:
+            non_nullable_set.add(str(c).lower())
+
+    for col_name, col_meta in profile.get("columns", {}).items():
+        if col_meta.get("nullable") == "NO" or col_meta.get("candidate_primary_key") is True:
+            non_nullable_set.add(str(col_name).lower())
+
     # Parallelized column-level DQ checks
     with concurrent.futures.ThreadPoolExecutor() as executor:
         col_futures = [
@@ -3471,7 +3497,8 @@ def analyze_dataset_quality(
                 col,
                 profile.get("columns", {}).get(col, {}).get("semantic_type", "unknown"),
                 thresholds,
-                (col in priority_cols)
+                (col in priority_cols),
+                non_nullable_set
             )
             for col in df.columns
         ]

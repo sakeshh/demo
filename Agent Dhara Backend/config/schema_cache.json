@@ -1,17 +1,24 @@
 {
-    "dbo.Customers_Raw": {
-        "CustomerID": "int64",
-        "CustomerName": "object",
-        "Email": "object",
-        "Phone": "object",
-        "City": "object",
-        "CreatedDate": "object"
+    "dbo.courses_Clean": {
+        "course_id": "object",
+        "course_name": "object",
+        "instructor": "object",
+        "department": "object",
+        "credits": "object",
+        "fee": "object",
+        "etl_created_at": "object",
+        "etl_updated_at": "object",
+        "etl_batch_id": "int64"
     },
-    "dbo.Orders_Raw": {
-        "OrderID": "int64",
-        "CustomerID": "int64",
-        "OrderDate": "object",
-        "OrderAmount": "object",
-        "OrderStatus": "object"
+    "dbo.students_Clean": {
+        "email": "object",
+        "student_id": "object",
+        "dob": "object",
+        "name": "object",
+        "phone": "object",
+        "department": "object",
+        "etl_created_at": "object",
+        "etl_updated_at": "object",
+        "etl_batch_id": "int64"
     }
 }
