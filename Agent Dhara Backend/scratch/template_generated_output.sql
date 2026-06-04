@@ -4,7 +4,7 @@
 -- Grade: A
 -- No issues detected. Fully production ready!
 -- ============================================================
--- ETL SQL — Agent Dhara — plan_id=plan_1780468191
+-- ETL SQL — Agent Dhara — plan_id=plan_1780555178
 -- dialect=tsql — review before executing against production.
 
 -- ⚠ 1 item(s) flagged for manual review before production run.
@@ -67,7 +67,7 @@ GO
 IF OBJECT_ID('data_1.json_Clean', 'U') IS NULL
 BEGIN
     CREATE TABLE [data_1].[json_Clean] (
-    [id] NVARCHAR(MAX) NOT NULL,
+    [id] NVARCHAR(255) NOT NULL,
     [name] NVARCHAR(255) NULL,
     [department] NVARCHAR(MAX) NULL,
     [phone] NVARCHAR(50) NULL,
@@ -86,7 +86,7 @@ GO
 IF OBJECT_ID('data_1.xml_Clean', 'U') IS NULL
 BEGIN
     CREATE TABLE [data_1].[xml_Clean] (
-    [id] NVARCHAR(MAX) NOT NULL,
+    [id] NVARCHAR(255) NOT NULL,
     [name] NVARCHAR(255) NULL,
     [department] NVARCHAR(MAX) NULL,
     [phone] NVARCHAR(50) NULL,
@@ -133,7 +133,7 @@ AS BEGIN
         IF OBJECT_ID('data_1.json_Clean', 'U') IS NULL
         BEGIN
             CREATE TABLE [data_1].[json_Clean] (
-                [id] NVARCHAR(MAX) NOT NULL,
+                [id] NVARCHAR(255) NOT NULL,
         [name] NVARCHAR(255) NULL,
         [department] NVARCHAR(MAX) NULL,
         [phone] NVARCHAR(50) NULL,
@@ -195,13 +195,13 @@ AS BEGIN
         BEGIN
             TRUNCATE TABLE [data_1].[json_Clean];
             INSERT INTO [data_1].[json_Clean] ([age], [department], [email], [id], [name], [phone], [salary], etl_batch_id, etl_created_at, etl_updated_at)
-            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), [id], TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #json_Staging;
+            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), TRY_CAST([id] AS NVARCHAR(255)), TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #json_Staging;
         END
         ELSE
         BEGIN
             DELETE FROM [data_1].[json_Clean] WHERE [id] IN (SELECT [id] FROM #json_Staging);
             INSERT INTO [data_1].[json_Clean] ([age], [department], [email], [id], [name], [phone], [salary], etl_batch_id, etl_created_at, etl_updated_at)
-            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), [id], TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #json_Staging;
+            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), TRY_CAST([id] AS NVARCHAR(255)), TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #json_Staging;
         END;
 
         DECLARE @staging_rows INT = (SELECT COUNT(*) FROM #json_Staging);
@@ -274,7 +274,7 @@ AS BEGIN
         IF OBJECT_ID('data_1.json_Clean', 'U') IS NULL
         BEGIN
             CREATE TABLE [data_1].[json_Transformed] (
-                [id] NVARCHAR(MAX) NOT NULL,
+                [id] NVARCHAR(255) NOT NULL,
         [name] NVARCHAR(255) NULL,
         [department] NVARCHAR(MAX) NULL,
         [phone] NVARCHAR(50) NULL,
@@ -312,13 +312,13 @@ AS BEGIN
         BEGIN
             TRUNCATE TABLE [data_1].[json_Transformed];
             INSERT INTO [data_1].[json_Transformed] ([age], [department], [email], [id], [name], [phone], [salary], etl_batch_id, etl_created_at, etl_updated_at)
-            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), [id], TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #json_Transform_Staging;
+            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), TRY_CAST([id] AS NVARCHAR(255)), TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #json_Transform_Staging;
         END
         ELSE
         BEGIN
             DELETE FROM [data_1].[json_Transformed] WHERE [id] IN (SELECT [id] FROM #json_Transform_Staging);
             INSERT INTO [data_1].[json_Transformed] ([age], [department], [email], [id], [name], [phone], [salary], etl_batch_id, etl_created_at, etl_updated_at)
-            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), [id], TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #json_Transform_Staging;
+            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), TRY_CAST([id] AS NVARCHAR(255)), TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #json_Transform_Staging;
         END;
 
         DECLARE @staging_rows INT = (SELECT COUNT(*) FROM #json_Transform_Staging);
@@ -391,7 +391,7 @@ AS BEGIN
         IF OBJECT_ID('data_1.xml_Clean', 'U') IS NULL
         BEGIN
             CREATE TABLE [data_1].[xml_Clean] (
-                [id] NVARCHAR(MAX) NOT NULL,
+                [id] NVARCHAR(255) NOT NULL,
         [name] NVARCHAR(255) NULL,
         [department] NVARCHAR(MAX) NULL,
         [phone] NVARCHAR(50) NULL,
@@ -453,13 +453,13 @@ AS BEGIN
         BEGIN
             TRUNCATE TABLE [data_1].[xml_Clean];
             INSERT INTO [data_1].[xml_Clean] ([age], [department], [email], [id], [name], [phone], [salary], etl_batch_id, etl_created_at, etl_updated_at)
-            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), [id], TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #xml_Staging;
+            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), TRY_CAST([id] AS NVARCHAR(255)), TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #xml_Staging;
         END
         ELSE
         BEGIN
             DELETE FROM [data_1].[xml_Clean] WHERE [id] IN (SELECT [id] FROM #xml_Staging);
             INSERT INTO [data_1].[xml_Clean] ([age], [department], [email], [id], [name], [phone], [salary], etl_batch_id, etl_created_at, etl_updated_at)
-            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), [id], TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #xml_Staging;
+            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), TRY_CAST([id] AS NVARCHAR(255)), TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #xml_Staging;
         END;
 
         DECLARE @staging_rows INT = (SELECT COUNT(*) FROM #xml_Staging);
@@ -532,7 +532,7 @@ AS BEGIN
         IF OBJECT_ID('data_1.xml_Clean', 'U') IS NULL
         BEGIN
             CREATE TABLE [data_1].[xml_Transformed] (
-                [id] NVARCHAR(MAX) NOT NULL,
+                [id] NVARCHAR(255) NOT NULL,
         [name] NVARCHAR(255) NULL,
         [department] NVARCHAR(MAX) NULL,
         [phone] NVARCHAR(50) NULL,
@@ -570,13 +570,13 @@ AS BEGIN
         BEGIN
             TRUNCATE TABLE [data_1].[xml_Transformed];
             INSERT INTO [data_1].[xml_Transformed] ([age], [department], [email], [id], [name], [phone], [salary], etl_batch_id, etl_created_at, etl_updated_at)
-            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), [id], TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #xml_Transform_Staging;
+            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), TRY_CAST([id] AS NVARCHAR(255)), TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #xml_Transform_Staging;
         END
         ELSE
         BEGIN
             DELETE FROM [data_1].[xml_Transformed] WHERE [id] IN (SELECT [id] FROM #xml_Transform_Staging);
             INSERT INTO [data_1].[xml_Transformed] ([age], [department], [email], [id], [name], [phone], [salary], etl_batch_id, etl_created_at, etl_updated_at)
-            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), [id], TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #xml_Transform_Staging;
+            SELECT [age], [department], TRY_CAST([email] AS NVARCHAR(255)), TRY_CAST([id] AS NVARCHAR(255)), TRY_CAST([name] AS NVARCHAR(255)), TRY_CAST([phone] AS NVARCHAR(50)), [salary], etl_batch_id, GETDATE(), GETDATE() FROM #xml_Transform_Staging;
         END;
 
         DECLARE @staging_rows INT = (SELECT COUNT(*) FROM #xml_Transform_Staging);

@@ -1,22 +1,22 @@
 {
     "dbo.courses_Clean": {
-        "course_id": "object",
-        "course_name": "object",
         "instructor": "object",
-        "department": "object",
+        "course_name": "object",
+        "course_id": "object",
         "credits": "object",
+        "department": "object",
         "fee": "object",
         "etl_created_at": "object",
         "etl_updated_at": "object",
         "etl_batch_id": "int64"
     },
     "dbo.students_Clean": {
-        "email": "object",
-        "student_id": "object",
         "dob": "object",
         "name": "object",
-        "phone": "object",
+        "email": "object",
+        "student_id": "object",
         "department": "object",
+        "phone": "object",
         "etl_created_at": "object",
         "etl_updated_at": "object",
         "etl_batch_id": "int64"

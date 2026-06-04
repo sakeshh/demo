@@ -10,6 +10,7 @@ import {
   ManyToManyCard,
   OverallReadinessBanner,
   StepEvidenceTooltip,
+  LlmRecommendationBadge,
   applyEngineRecommendation,
   getPlanFromRecord,
   getStepNarration,
@@ -1127,7 +1128,14 @@ export default function EtlGenerationPanel({
                         <td className="p-2 font-mono">{r.dataset}</td>
                         <td className="p-2">{r.order}</td>
                         <td className="p-2 font-mono">{r.column ?? '—'}</td>
-                        <td className="p-2 font-mono">{r.action}</td>
+                        <td className="p-2 font-mono">
+                          {r.action}
+                          {stMeta?.llm_recommendation ? (
+                            <span className="ml-1 inline-block shrink-0">
+                              <LlmRecommendationBadge llmRec={stMeta.llm_recommendation} darkMode={dm} />
+                            </span>
+                          ) : null}
+                        </td>
                         <td className="p-2">
                           <span
                             className={`rounded-full px-2 py-0.5 text-[9px] font-black uppercase ${bucketBadgeClass(r.bucket, dm)}`}

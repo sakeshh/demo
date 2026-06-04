@@ -121,6 +121,18 @@ def apply_manual_resolutions(
             resolved_log.append({**item, "promoted": True})
             continue
 
+        if action == "force_unlock":
+            ds = str(item.get("dataset") or "").strip()
+            if ds:
+                force_list = list(rules.get("force_unlock") or [])
+                if ds not in force_list:
+                    force_list.append(ds)
+                rules["force_unlock"] = force_list
+                plan["business_rules"] = rules
+            item["status"] = "resolved"
+            resolved_log.append({**item, "promoted": True})
+            continue
+
         if is_skip_action(action):
             item["status"] = "skipped"
             resolved_log.append({**item, "promoted": False})

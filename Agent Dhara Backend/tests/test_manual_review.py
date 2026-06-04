@@ -219,5 +219,38 @@ class TestBlockerManualReview(unittest.TestCase):
         self.assertIn("ROW_NUMBER() OVER (PARTITION BY LOWER(LTRIM(RTRIM(CAST([CustomerID] AS NVARCHAR(400))))), LOWER(LTRIM(RTRIM(CAST([Email] AS NVARCHAR(400)))))", code_sql)
 
 
+class TestDqGateWarningAndCaching(unittest.TestCase):
+    def test_dq_gate_warning_resolution_options(self) -> None:
+        from agent.etl_pipeline.manual_review_catalog import get_resolution_options
+        opts = get_resolution_options("dq_gate_warning")
+        self.assertEqual(len(opts), 2)
+        self.assertEqual(opts[0]["action"], "force_unlock")
+        self.assertEqual(opts[1]["action"], "noop")
+
+    def test_promote_force_unlock_adds_to_rules(self) -> None:
+        plan = {
+            "plan_id": "test_gate_unlock",
+            "datasets": {"dbo.courses_raw": {"steps": []}},
+            "manual_review": [
+                enrich_manual_review_item(
+                    {
+                        "dataset": "dbo.courses_raw",
+                        "column": None,
+                        "issue_type": "dq_gate_warning",
+                        "message": "DQ score below threshold",
+                    }
+                )
+            ],
+            "business_rules": {},
+        }
+        item_id = plan["manual_review"][0]["id"]
+        updated, errs = apply_manual_resolutions(
+            plan,
+            [{"item_id": item_id, "resolution_id": "force_unlock"}],
+        )
+        self.assertEqual(errs, [])
+        self.assertIn("dbo.courses_raw", updated["business_rules"].get("force_unlock", []))
+
+
 if __name__ == "__main__":
     unittest.main()

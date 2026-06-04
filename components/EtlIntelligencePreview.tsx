@@ -19,6 +19,7 @@ export interface StepEvidence {
   alternatives: string[];
   confidence: number;
   rule_override?: boolean;
+  llm_recommendation?: any;
 }
 
 export interface EngineRecommendation {
@@ -41,6 +42,26 @@ export interface PlanNarration {
   manual_review_explanations?: Array<{ column: string; explanation: string }>;
   relationships_summary?: string;
   overall_readiness?: string;
+}
+
+export function LlmRecommendationBadge({
+  llmRec,
+  darkMode = false,
+}: {
+  llmRec: any;
+  darkMode?: boolean;
+}) {
+  if (!llmRec) return null;
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-black uppercase tracking-wide ${
+        darkMode ? 'bg-purple-500/20 text-purple-200' : 'bg-purple-100 text-purple-800'
+      }`}
+      title={`AI Recommendation: ${llmRec.suggested_fix}`}
+    >
+      ✨ AI Insight
+    </span>
+  );
 }
 
 function engineRecToUi(rec: EngineRecommendation): string {
@@ -315,6 +336,16 @@ export function StepEvidenceTooltip({
           </button>
           <p className="mb-2 pr-4 font-semibold">Why this action?</p>
           <p className="mb-2 opacity-90">{narration || evidence.why_this_action}</p>
+
+          {evidence.llm_recommendation ? (
+            <div className="mb-2 rounded border border-purple-500/20 bg-purple-500/5 p-2 text-[11px]">
+              <p className="font-bold text-purple-700 mb-0.5">✨ AI Recommendation</p>
+              <p className="mb-1"><strong>Fix:</strong> {evidence.llm_recommendation.suggested_fix}</p>
+              <p className="mb-1"><strong>Why:</strong> {evidence.llm_recommendation.why_it_matters}</p>
+              <p className="mb-0 text-red-500"><strong>Risk:</strong> {evidence.llm_recommendation.risk}</p>
+            </div>
+          ) : null}
+
           <motion.div
             className={`mb-2 grid grid-cols-2 gap-1 rounded p-2 ${
               darkMode ? 'bg-white/5' : 'bg-zinc-50'

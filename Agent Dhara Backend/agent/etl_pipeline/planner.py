@@ -424,6 +424,7 @@ def build_etl_plan(
     engine: str = "python",
     source_context: Optional[Dict[str, Any]] = None,
     generation_mode: Optional[str] = "full",
+    dq_recommendations: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Build versioned ETL plan JSON from assessment + normalized business rules.
@@ -499,6 +500,78 @@ def build_etl_plan(
     if source_context and "suggestions" in source_context:
         suggestions.extend(source_context["suggestions"])
 
+    # Merge LLM recommendations into suggestions
+    if dq_recommendations:
+        from agent.etl_pipeline.llm_rec_mapper import map_llm_recommendation_to_action, compute_llm_confidence
+        recs_list = []
+        if isinstance(dq_recommendations, dict):
+            recs_list = dq_recommendations.get("recommendations") or []
+        elif isinstance(dq_recommendations, list):
+            recs_list = dq_recommendations
+
+        def _norm(v):
+            return str(v or "").strip().lower()
+
+        sug_map = {}
+        for sug in suggestions:
+            k = (_norm(sug.get("dataset")), _norm(sug.get("column")), _norm(sug.get("issue_type")))
+            sug_map[k] = sug
+
+        for rec in recs_list:
+            if not isinstance(rec, dict):
+                continue
+            ds = rec.get("dataset")
+            col = rec.get("column")
+            it = rec.get("issue_type")
+
+            mapped_action = map_llm_recommendation_to_action(rec)
+            confidence = compute_llm_confidence(rec)
+
+            matched_sug = None
+            key = (_norm(ds), _norm(col), _norm(it))
+            if key in sug_map:
+                matched_sug = sug_map[key]
+            else:
+                candidates = [
+                    sug for sug in suggestions
+                    if _norm(sug.get("dataset")) == _norm(ds) and _norm(sug.get("column")) == _norm(col)
+                ]
+                if len(candidates) == 1:
+                    matched_sug = candidates[0]
+                elif len(candidates) > 1:
+                    for cand in candidates:
+                        cit = _norm(cand.get("issue_type"))
+                        rit = _norm(it)
+                        if rit in cit or cit in rit:
+                            matched_sug = cand
+                            break
+                    if not matched_sug:
+                        matched_sug = candidates[0]
+
+            if matched_sug:
+                matched_sug["llm_recommendation"] = rec
+                matched_sug["llm_confidence"] = confidence
+                if confidence >= 0.80 and mapped_action and mapped_action != "noop":
+                    matched_sug["suggested_action"] = mapped_action
+                    matched_sug["auto_fixable"] = True
+            else:
+                new_sug = {
+                    "dataset": ds,
+                    "column": col,
+                    "issue_type": it or "llm_inferred_issue",
+                    "severity": rec.get("severity") or "medium",
+                    "message": rec.get("why_it_matters") or rec.get("suggested_fix") or "LLM Inferred Issue",
+                    "suggested_action": mapped_action or "noop",
+                    "manual_guidance": rec.get("suggested_fix") or "",
+                    "row_count_affected": None,
+                    "auto_fixable": confidence >= 0.80 and mapped_action not in ("noop", None),
+                    "llm_recommendation": rec,
+                    "llm_confidence": confidence,
+                }
+                suggestions.append(new_sug)
+                new_key = (_norm(ds), _norm(col), _norm(it or "llm_inferred_issue"))
+                sug_map[new_key] = new_sug
+
     manual_review: List[Dict[str, Any]] = []
     blocked: List[Dict[str, Any]] = []
     # (dataset, column, action) -> step record
@@ -521,14 +594,16 @@ def build_etl_plan(
                 break
         if not found:
             manual_review.append(
-                {
-                    "dataset": "global",
-                    "column": rc,
-                    "issue_type": "missing_required_column",
-                    "severity": "HIGH",
-                    "message": f"Required column '{rc}' not found in any assessed dataset.",
-                    "guidance": "Provide the column in a source dataset or choose 'skip_requirement' to remove it from requirements.",
-                }
+                enrich_manual_review_item(
+                    {
+                        "dataset": "global",
+                        "column": rc,
+                        "issue_type": "missing_required_column",
+                        "severity": "HIGH",
+                        "message": f"Required column '{rc}' not found in any assessed dataset.",
+                        "guidance": "Provide the column in a source dataset or choose 'skip_requirement' to remove it from requirements.",
+                    }
+                )
             )
 
     for s in suggestions:
@@ -540,6 +615,8 @@ def build_etl_plan(
         if ds and ds != "_global" and column_is_excluded(col, exclude):
             continue
 
+        llm_rec = s.get("llm_recommendation")
+
         if action == "review_manually" or not s.get("auto_fixable", False):
             manual_review.append(
                 enrich_manual_review_item(
@@ -550,7 +627,8 @@ def build_etl_plan(
                         "severity": sev,
                         "message": s.get("message"),
                         "guidance": s.get("manual_guidance") or "",
-                    }
+                    },
+                    llm_recommendation=llm_rec,
                 )
             )
             continue
@@ -597,6 +675,8 @@ def build_etl_plan(
                 col_stats["pii_level"] = desc.get("pii_level")
                 col_stats["fill_strategy"] = desc.get("fill_strategy")
         evidence = _build_evidence(s, col_stats, action2, rules)
+        if s.get("llm_recommendation"):
+            evidence["llm_recommendation"] = s["llm_recommendation"]
         params = build_step_params(
             action2,
             column=col,
@@ -618,6 +698,8 @@ def build_etl_plan(
             "evidence": evidence,
             "message": s.get("message"),
         }
+        if s.get("llm_recommendation"):
+            entry["llm_recommendation"] = s["llm_recommendation"]
         prev = step_map.get(key)
         if not prev or (row_est and (prev.get("estimated_affected_rows") or 0) < (row_est or 0)):
             step_map[key] = entry

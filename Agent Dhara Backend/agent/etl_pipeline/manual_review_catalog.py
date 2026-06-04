@@ -161,6 +161,47 @@ _CATALOG: Dict[str, List[ResolutionOption]] = {
         _opt("reject_orphans", "Validate referential integrity (reject/stage)", "validate_referential_integrity_or_stage", recommended=True, description="Filter out/delete records where foreign key does not exist in target."),
         _opt("keep_as_is", "Keep raw (allow orphans)", "noop", description="Accept orphan keys and pass them to target."),
     ],
+    "dq_gate_warning": [
+        _opt("force_unlock", "Acknowledge and proceed (force unlock)", "force_unlock", recommended=True, description="Override the data quality gate for this dataset to allow phase 2 transformations."),
+        _opt("keep_as_is", "Keep blocked (resolve DQ issues first)", "noop", description="Keep phase 2 transformations blocked until quality issues are resolved."),
+    ],
+    "whitespace": [
+        _opt("trim", "Trim leading/trailing whitespace", "trim", recommended=True, description="Remove leading and trailing whitespace from string values."),
+        _opt("keep_as_is", "Keep as-is", "noop"),
+    ],
+    "nulls": [
+        _opt("fill_nulls", "Fill nulls (median/mean/mode/constant)", "fill_nulls_simple", recommended=True, description="Impute null values using column statistics or a default value."),
+        _opt("keep_as_is", "Keep as-is", "noop"),
+    ],
+    "duplicate_rows": [
+        _opt("deduplicate", "Deduplicate (keep first row)", "deduplicate", recommended=True, description="Remove duplicate rows, keeping only the first occurrence."),
+        _opt("keep_as_is", "Keep as-is (allow duplicate rows)", "noop"),
+    ],
+    "empty_string_values": [
+        _opt("fill_nulls", "Convert to NULL and impute", "fill_nulls_simple", recommended=True, description="Convert empty/blank strings to NULL and fill them."),
+        _opt("keep_as_is", "Keep empty strings as-is", "noop"),
+    ],
+    "case_inconsistency": [
+        _opt("lowercase", "Standardize to lowercase", "lowercase", recommended=True, description="Convert string values to lowercase to resolve case inconsistencies."),
+        _opt("uppercase", "Standardize to uppercase", "uppercase", description="Convert string values to uppercase to resolve case inconsistencies."),
+        _opt("keep_as_is", "Keep as-is", "noop"),
+    ],
+    "invalid_email": [
+        _opt("sanitize_email", "Sanitize email format", "sanitize_email", recommended=True, description="Clean whitespace, lowercase, and validate email syntax, nullifying invalid ones."),
+        _opt("keep_as_is", "Keep as-is", "noop"),
+    ],
+    "invalid_phone": [
+        _opt("normalize_phone", "Normalize phone numbers", "normalize_phone", recommended=True, description="Standardize phone formats by removing non-numeric characters."),
+        _opt("keep_as_is", "Keep as-is", "noop"),
+    ],
+    "invalid_numeric": [
+        _opt("coerce_numeric", "Coerce values to numeric", "coerce_numeric", recommended=True, description="Convert string representations of numbers to numeric datatype and nullify/flag invalid ones."),
+        _opt("keep_as_is", "Keep as-is", "noop"),
+    ],
+    "negative_values": [
+        _opt("clip_or_flag", "Clip or flag negative values", "clip_or_flag", recommended=True, description="Handle negative values based on outlier strategy (clip to zero or flag)."),
+        _opt("keep_as_is", "Keep negative values as-is", "noop"),
+    ],
 }
 
 
@@ -179,8 +220,15 @@ def get_resolution_options(issue_type: Optional[str]) -> List[ResolutionOption]:
     return opts
 
 
-def enrich_manual_review_item(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach id, resolution_options, default_resolution, status."""
+def enrich_manual_review_item(
+    item: Dict[str, Any],
+    llm_recommendation: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Attach id, resolution_options, default_resolution, status, and optional LLM recommendation."""
+    if item.get("id") and item.get("resolution_options"):
+        if not llm_recommendation or any(o.get("id") == "llm_suggested" for o in item.get("resolution_options", [])):
+            return item
+
     out = dict(item)
     iid = out.get("id") or manual_review_item_id(
         out.get("dataset"), out.get("column"), out.get("issue_type")
@@ -191,12 +239,65 @@ def enrich_manual_review_item(item: Dict[str, Any]) -> Dict[str, Any]:
         opts = get_resolution_options(issue_type)
     else:
         opts = get_dynamic_resolution_options(issue_type, out)
+
+    if llm_recommendation:
+        out["llm_recommendation"] = llm_recommendation
+        from agent.etl_pipeline.llm_rec_mapper import map_llm_recommendation_to_action, compute_llm_confidence
+        llm_action = map_llm_recommendation_to_action(llm_recommendation)
+        confidence = compute_llm_confidence(llm_recommendation)
+
+        for opt in opts:
+            opt["recommended"] = False
+
+        llm_opt = {
+            "id": "llm_suggested",
+            "label": f"AI Recommended: {llm_recommendation.get('suggested_fix')}",
+            "action": llm_action or "noop",
+            "recommended": True,
+            "description": f"Why it matters: {llm_recommendation.get('why_it_matters')}. Risk: {llm_recommendation.get('risk')}",
+            "llm_metadata": {
+                "example_sql": llm_recommendation.get("example_sql"),
+                "example_pandas": llm_recommendation.get("example_pandas"),
+                "confidence": confidence,
+            }
+        }
+        opts = [llm_opt] + [opt for opt in opts if opt.get("id") != "llm_suggested"]
+
     out["resolution_options"] = opts
     default = next((o["id"] for o in opts if o.get("recommended")), opts[0]["id"] if opts else "keep_as_is")
     out.setdefault("default_resolution", default)
     out.setdefault("status", "pending")
     out.setdefault("selected_resolution", None)
     return out
+
+
+import os
+import json
+
+_CACHE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "config",
+    "dynamic_options_cache.json"
+)
+
+def _load_dynamic_options_cache() -> Dict[str, List[ResolutionOption]]:
+    try:
+        if os.path.exists(_CACHE_FILE):
+            with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_dynamic_options_cache(cache: Dict[str, List[ResolutionOption]]):
+    try:
+        os.makedirs(os.path.dirname(_CACHE_FILE), exist_ok=True)
+        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+    except Exception:
+        pass
+
+_DYNAMIC_OPTIONS_CACHE = _load_dynamic_options_cache()
 
 
 def get_dynamic_resolution_options(issue_type: str, item: Dict[str, Any]) -> List[ResolutionOption]:
@@ -210,6 +311,12 @@ def get_dynamic_resolution_options(issue_type: str, item: Dict[str, Any]) -> Lis
     import logging
     from agent.model_config import load_llm_config
 
+    cache_key = issue_type.strip().lower()
+    global _DYNAMIC_OPTIONS_CACHE
+    _DYNAMIC_OPTIONS_CACHE = _load_dynamic_options_cache()
+    if cache_key in _DYNAMIC_OPTIONS_CACHE:
+        return _DYNAMIC_OPTIONS_CACHE[cache_key]
+
     opts = [
         _opt("keep_as_is", "Keep as-is (skip in ETL)", "noop", description="No transform; document in runbook.")
     ]
@@ -217,6 +324,8 @@ def get_dynamic_resolution_options(issue_type: str, item: Dict[str, Any]) -> Lis
     cfg = load_llm_config()
     if not cfg:
         opts[0]["recommended"] = True
+        _DYNAMIC_OPTIONS_CACHE[cache_key] = opts
+        _save_dynamic_options_cache(_DYNAMIC_OPTIONS_CACHE)
         return opts
 
     client = None
@@ -235,10 +344,14 @@ def get_dynamic_resolution_options(issue_type: str, item: Dict[str, Any]) -> Lis
         logger = logging.getLogger("agent.manual_review_catalog")
         logger.error(f"Failed to initialize OpenAI client: {e}")
         opts[0]["recommended"] = True
+        _DYNAMIC_OPTIONS_CACHE[cache_key] = opts
+        _save_dynamic_options_cache(_DYNAMIC_OPTIONS_CACHE)
         return opts
 
     if not client:
         opts[0]["recommended"] = True
+        _DYNAMIC_OPTIONS_CACHE[cache_key] = opts
+        _save_dynamic_options_cache(_DYNAMIC_OPTIONS_CACHE)
         return opts
 
     system_prompt = (
@@ -311,6 +424,8 @@ def get_dynamic_resolution_options(issue_type: str, item: Dict[str, Any]) -> Lis
     if not any(o.get("recommended") for o in opts):
         opts[0]["recommended"] = True
 
+    _DYNAMIC_OPTIONS_CACHE[cache_key] = opts
+    _save_dynamic_options_cache(_DYNAMIC_OPTIONS_CACHE)
     return opts
 
 

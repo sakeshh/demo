@@ -69,6 +69,7 @@ type BackendAssessment = {
     >;
     global_issues?: Record<string, any>;
   };
+  dq_recommendations?: any;
 };
 
 type UiDatasetSummary = {
@@ -280,6 +281,22 @@ export default function DataAssessmentReport({
           setTransformSuggestions(null);
         } finally {
           setTransformLoading(false);
+        }
+      }
+
+      if (dqRecEnabled && result && !result.dq_recommendations) {
+        try {
+          const res = await fetch('/api/dq-recommend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ data_quality: result.data_quality_issues || result, user_intent: title }),
+          });
+          const j = await res.json().catch(() => null);
+          if (j?.recommendations) {
+            result.dq_recommendations = j.recommendations;
+          }
+        } catch (e) {
+          console.error("Failed to pre-fetch DQ recommendations:", e);
         }
       }
 

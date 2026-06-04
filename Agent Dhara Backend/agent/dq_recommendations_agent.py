@@ -39,6 +39,7 @@ JSON schema:
       "severity": "high|medium|low",
       "why_it_matters": "string",
       "suggested_fix": "string",
+      "mapped_action": "trim|fill_nulls_simple|cast_type|regex_replace|deduplicate|parse_dates|sanitize_email|normalize_phone|clip_or_flag|flag_outliers|zero_to_null|lowercase|uppercase|exclude_column|drop_column|noop",
       "example_sql": "string|null",
       "example_pandas": "string|null",
       "risk": "string"
@@ -61,15 +62,39 @@ def _fallback(dq: Dict[str, Any]) -> DQRecommendations:
         for it in issues[:60]:
             if not isinstance(it, dict):
                 continue
+            issue_type = it.get("type") or it.get("issue_type") or "issue"
+            # simple fallback mapping to mapped_action
+            mapped = "noop"
+            itl = issue_type.lower()
+            if "whitespace" in itl:
+                mapped = "trim"
+            elif "null" in itl:
+                mapped = "fill_nulls_simple"
+            elif "date" in itl:
+                mapped = "parse_dates"
+            elif "email" in itl:
+                mapped = "sanitize_email"
+            elif "phone" in itl:
+                mapped = "normalize_phone"
+            elif "numeric" in itl or "mixed" in itl:
+                mapped = "coerce_numeric"
+            elif "duplicate" in itl:
+                mapped = "deduplicate"
+            elif "outlier" in itl:
+                mapped = "flag_outliers"
+            elif "skew" in itl:
+                mapped = "flag_outliers"
+
             recs.append(
                 {
                     "priority": 99,
                     "dataset": ds_name,
                     "column": it.get("column"),
-                    "issue_type": it.get("type") or it.get("issue_type") or "issue",
+                    "issue_type": issue_type,
                     "severity": it.get("severity") or "medium",
                     "why_it_matters": it.get("message") or "",
                     "suggested_fix": it.get("recommendation") or "Review and remediate based on business rules.",
+                    "mapped_action": mapped,
                     "example_sql": None,
                     "example_pandas": None,
                     "risk": "Fallback mode (LLM not configured). Validate before applying changes.",

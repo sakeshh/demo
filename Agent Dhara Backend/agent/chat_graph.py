@@ -410,6 +410,17 @@ def _build_report_tables_markdown(result: Dict[str, Any]) -> str:
     """
     if not isinstance(result, dict):
         return ""
+
+    # Ensure dq_recommendations is populated in result
+    if "dq_recommendations" not in result:
+        try:
+            from agent.dq_recommendations_agent import DQRecommendationsAgent, dq_recommendations_to_dict
+            agent = DQRecommendationsAgent()
+            merged_dq = result.get("data_quality_issues") or {}
+            rec, _ = agent.recommend(merged_dq=merged_dq)
+            result["dq_recommendations"] = dq_recommendations_to_dict(rec)
+        except Exception:
+            pass
     datasets = result.get("datasets") or {}
     dq = (result.get("data_quality_issues") or {}).get("datasets") or {}
     rels = result.get("relationships") or []
@@ -705,6 +716,25 @@ def _build_report_tables_markdown(result: Dict[str, Any]) -> str:
             f"- **Score:** {etl_ready.get('score')} ({etl_ready.get('grade')})\n"
             f"- **Recommendation:** {_md_escape(etl_ready.get('etl_recommendation'))}"
         )
+
+    # LLM Cleaning Recommendations table
+    dq_recs = result.get("dq_recommendations") or {}
+    recs_list = dq_recs.get("recommendations") or []
+    if recs_list:
+        parts.append("### LLM Cleaning Recommendations\n")
+        lines = [
+            "| Priority | Dataset | Column | Severity | Suggested Fix | Risk |",
+            "|---|---|---|---|---|---|",
+        ]
+        for r in recs_list:
+            priority = r.get("priority") or ""
+            ds = _md_escape(r.get("dataset") or "")
+            col = _md_escape(r.get("column") or "")
+            sev = _md_escape(r.get("severity") or "")
+            fix = _md_escape(r.get("suggested_fix") or "")
+            risk = _md_escape(r.get("risk") or "")
+            lines.append(f"| {priority} | `{ds}` | `{col}` | {sev} | {fix} | {risk} |")
+        parts.append("\n".join(lines))
 
     parts.append("### What might still be missed")
     parts.append(

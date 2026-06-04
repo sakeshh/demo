@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
+import RecommendationComparisonPanel from './RecommendationComparisonPanel';
 
 export interface ResolutionOption {
   id: string;
@@ -9,6 +10,7 @@ export interface ResolutionOption {
   action: string;
   recommended?: boolean;
   description?: string;
+  llm_metadata?: any;
 }
 
 export interface ManualReviewItem {
@@ -22,6 +24,7 @@ export interface ManualReviewItem {
   status?: string;
   default_resolution?: string;
   resolution_options?: ResolutionOption[];
+  llm_recommendation?: any;
 }
 
 export interface ManualReviewPanelProps {
@@ -42,32 +45,32 @@ export default function ManualReviewPanel({
     [items]
   );
 
-  const [picks, setPicks] = useState<Record<string, string>>({});
+  const [userPicks, setUserPicks] = useState<Record<string, string>>({});
 
-  useEffect(() => {
-    const next: Record<string, string> = {};
-    for (const m of pending) {
-      const def =
+  const getPick = useCallback(
+    (m: ManualReviewItem) => {
+      return (
+        userPicks[m.id] ||
         m.default_resolution ||
         m.resolution_options?.find((o) => o.recommended)?.id ||
         m.resolution_options?.[0]?.id ||
-        'keep_as_is';
-      next[m.id] = def;
-    }
-    setPicks(next);
-  }, [pending]);
+        'keep_as_is'
+      );
+    },
+    [userPicks]
+  );
 
   const setPick = useCallback((itemId: string, resolutionId: string) => {
-    setPicks((prev) => ({ ...prev, [itemId]: resolutionId }));
+    setUserPicks((prev) => ({ ...prev, [itemId]: resolutionId }));
   }, []);
 
   const applyAll = useCallback(async () => {
     const resolutions = pending.map((m) => ({
       item_id: m.id,
-      resolution_id: picks[m.id] || m.default_resolution || 'keep_as_is',
+      resolution_id: getPick(m),
     }));
     await onApply(resolutions);
-  }, [pending, picks, onApply]);
+  }, [pending, getPick, onApply]);
 
   if (!pending.length) return null;
 
@@ -123,42 +126,51 @@ export default function ManualReviewPanel({
               <p className={`mb-3 text-xs italic ${sub}`}>{m.guidance}</p>
             ) : null}
 
-            <div className="space-y-2">
-              {(m.resolution_options || []).map((opt) => {
-                const checked = picks[m.id] === opt.id;
-                return (
-                  <label
-                    key={opt.id}
-                    className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-xs transition ${
-                      checked
-                        ? darkMode
-                          ? 'border-emerald-400/50 bg-emerald-500/15'
-                          : 'border-emerald-400 bg-emerald-50'
-                        : darkMode
-                          ? 'border-white/10 hover:bg-white/5'
-                          : 'border-black/5 hover:bg-black/[0.02]'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name={`manual-${m.id}`}
-                      checked={checked}
-                      onChange={() => setPick(m.id, opt.id)}
-                      className="mt-0.5"
-                    />
-                    <span className={text}>
-                      <span className="font-semibold">{opt.label}</span>
-                      {opt.recommended ? (
-                        <span className="ml-1 text-[10px] font-bold text-emerald-600">recommended</span>
-                      ) : null}
-                      {opt.description ? (
-                        <span className={`mt-0.5 block font-normal ${sub}`}>{opt.description}</span>
-                      ) : null}
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
+            {m.llm_recommendation ? (
+              <RecommendationComparisonPanel
+                item={m}
+                selectedId={getPick(m)}
+                onSelect={(optId) => setPick(m.id, optId)}
+                darkMode={darkMode}
+              />
+            ) : (
+              <div className="space-y-2">
+                {(m.resolution_options || []).map((opt) => {
+                  const checked = getPick(m) === opt.id;
+                  return (
+                    <label
+                      key={opt.id}
+                      className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-xs transition ${
+                        checked
+                          ? darkMode
+                            ? 'border-emerald-400/50 bg-emerald-500/15'
+                            : 'border-emerald-400 bg-emerald-50'
+                          : darkMode
+                            ? 'border-white/10 hover:bg-white/5'
+                            : 'border-black/5 hover:bg-black/[0.02]'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name={`manual-${m.id}`}
+                        checked={checked}
+                        onChange={() => setPick(m.id, opt.id)}
+                        className="mt-0.5"
+                      />
+                      <span className={text}>
+                        <span className="font-semibold">{opt.label}</span>
+                        {opt.recommended ? (
+                          <span className="ml-1 text-[10px] font-bold text-emerald-600">recommended</span>
+                        ) : null}
+                        {opt.description ? (
+                          <span className={`mt-0.5 block font-normal ${sub}`}>{opt.description}</span>
+                        ) : null}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
           </li>
         ))}
       </ul>

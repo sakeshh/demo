@@ -490,12 +490,14 @@ def etl_plan_start(
     
     # --- Agentic Intelligence Pass ---
     # First, build a draft plan to generate the initial manual review queue
+    dq_recs = assess.get("dq_recommendations") if isinstance(assess, dict) else None
     draft_plan = build_etl_plan(
         assess,
         rules_merged,
         engine=engine,
         source_context=src_ctx,
         generation_mode=generation_mode,
+        dq_recommendations=dq_recs,
     )
     draft_plan = enrich_plan_manual_review(draft_plan)
     
@@ -512,6 +514,7 @@ def etl_plan_start(
             engine=engine,
             source_context=src_ctx,
             generation_mode=generation_mode,
+            dq_recommendations=dq_recs,
         )
         plan = enrich_plan_manual_review(plan)
     else:

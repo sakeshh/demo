@@ -926,6 +926,17 @@ def build_html_report(result: Dict[str, Any]) -> str:
     from datetime import datetime
     from collections import defaultdict
 
+    # Ensure dq_recommendations is populated in result
+    if isinstance(result, dict) and "dq_recommendations" not in result:
+        try:
+            from agent.dq_recommendations_agent import DQRecommendationsAgent, dq_recommendations_to_dict
+            agent = DQRecommendationsAgent()
+            merged_dq = result.get("data_quality_issues") or {}
+            rec, _ = agent.recommend(merged_dq=merged_dq)
+            result["dq_recommendations"] = dq_recommendations_to_dict(rec)
+        except Exception:
+            pass
+
     datasets = result.get("datasets", {})
     rels = result.get("relationships", [])
     dq = result.get("data_quality_issues", {})
@@ -1614,6 +1625,25 @@ def build_html_report(result: Dict[str, Any]) -> str:
 .clean-est-label { flex: 1 1 50%; min-width: min(100%, 280px); line-height: 1.35; }
 .clean-est-value { font-weight: 700; font-size: 1.12rem; flex: 0 0 auto; }
 .clean-est-tail { flex: 1 1 100%; margin: 0; line-height: 1.35; }
+.llm-recs-section { margin: 2rem 0; padding: 0 1rem; max-width: 1100px; margin-left: auto; margin-right: auto; }
+.rec-cards-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; margin-top: 1rem; }
+@media (min-width: 768px) {
+  .rec-cards-grid { grid-template-columns: repeat(auto-fill, minmax(48%, 1fr)); }
+}
+.rec-card { background: #ffffff; border: 1px solid #e2e8f0; border-left-width: 4px; border-radius: 8px; padding: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.05); text-align: left; }
+.border-sev-high { border-left-color: #ef4444; }
+.border-sev-medium { border-left-color: #f59e0b; }
+.border-sev-low { border-left-color: #3b82f6; }
+.rec-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+.pill-priority { background: #f1f5f9; color: #475569; font-size: 0.75rem; font-weight: 600; padding: 0.15rem 0.4rem; border-radius: 4px; }
+.pill-dataset { color: #1e293b; font-size: 0.85rem; font-weight: 700; }
+.pill-sev { font-size: 0.75rem; font-weight: 600; }
+.rec-issue-type { font-size: 0.95rem; font-weight: 700; margin: 0 0 0.5rem 0; color: #334155; }
+.rec-fix-text, .rec-why-text, .rec-risk-text { font-size: 0.88rem; margin: 0.35rem 0; color: #475569; }
+.code-wrap { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 0.5rem; margin: 0.50rem 0; }
+.code-title { display: block; font-size: 0.75rem; font-weight: 600; color: #64748b; margin-bottom: 0.25rem; text-transform: uppercase; }
+.code-wrap pre { margin: 0; padding: 0; overflow-x: auto; }
+.code-wrap code { font-family: monospace; font-size: 0.8rem; color: #0f172a; }
 """
 
     _report_css = get_report_html_css()
@@ -1624,6 +1654,70 @@ def build_html_report(result: Dict[str, Any]) -> str:
         governance_html = render_governance_html(result) or ""
     except Exception:
         governance_html = ""
+
+    # Generate LLM Recommendations html block
+    dq_recs = result.get("dq_recommendations") or {}
+    recs_list = dq_recs.get("recommendations") or []
+    nav_llm_rec_link = ""
+    llm_recs_section_html = ""
+    if recs_list:
+        nav_llm_rec_link = '\n  <a href="#llm-recs" class="nav-jump">LLM recommendations</a>'
+        cards = []
+        for r in recs_list:
+            priority = r.get("priority") or "—"
+            ds = esc(r.get("dataset") or "")
+            col = esc(r.get("column") or "")
+            issue = esc(r.get("issue_type") or "")
+            sev = esc((r.get("severity") or "medium").lower())
+            suggested_fix = esc(r.get("suggested_fix") or "")
+            why = esc(r.get("why_it_matters") or "")
+            risk = esc(r.get("risk") or "")
+            
+            sql_code = r.get("example_sql")
+            pandas_code = r.get("example_pandas")
+            
+            sql_html = ""
+            if sql_code:
+                sql_html = f"""<div class="code-wrap">
+                    <span class="code-title">SQL suggestion</span>
+                    <pre><code class="language-sql">{esc(sql_code)}</code></pre>
+                </div>"""
+                
+            pandas_html = ""
+            if pandas_code:
+                pandas_html = f"""<div class="code-wrap">
+                    <span class="code-title">Pandas suggestion</span>
+                    <pre><code class="language-python">{esc(pandas_code)}</code></pre>
+                </div>"""
+            
+            cards.append(f"""
+            <div class="rec-card border-sev-{sev}">
+              <div class="rec-header">
+                <span class="pill-priority">Priority {priority}</span>
+                <span class="pill-dataset">{ds}{f'.{col}' if col else ''}</span>
+                <span class="pill-sev badge sev-{sev}">{sev.upper()}</span>
+              </div>
+              <div class="rec-body">
+                <h4 class="rec-issue-type">Issue: <code>{issue}</code></h4>
+                <p class="rec-fix-text"><strong>Suggested Fix:</strong> {suggested_fix}</p>
+                <p class="rec-why-text"><strong>Why it matters:</strong> {why}</p>
+                {sql_html}
+                {pandas_html}
+                <p class="rec-risk-text"><strong>Risk:</strong> ⚠️ {risk}</p>
+              </div>
+            </div>
+            """)
+            
+        llm_recs_section_html = f"""
+        <section id="llm-recs" class="llm-recs-section">
+          <h2>LLM Cleaning Recommendations</h2>
+          <p class="section-lead">AI-assisted recommendations mapped from data quality findings.</p>
+          <div class="rec-cards-grid">
+            {"".join(cards)}
+          </div>
+        </section>
+        """
+
     return (
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
         "<meta charset=\"utf-8\"/>\n"
@@ -1644,7 +1738,7 @@ def build_html_report(result: Dict[str, Any]) -> str:
   <a href="#datasets" class="nav-jump" data-expand-datasets="1">Datasets</a>
   <a href="#relations" class="nav-jump" data-expand-relations="1">Relations</a>
   <a href="#globalq" class="nav-jump" data-expand-global="1">Global DQ</a>
-  <a href="#governance" class="nav-jump">Governance</a>{nav_llm_link}{nav_fix_link}
+  <a href="#governance" class="nav-jump">Governance</a>{nav_llm_link}{nav_llm_rec_link}{nav_fix_link}
   <button type="button" class="tool-btn secondary" id="btn-collapse-all">Collapse all</button>
   <button type="button" class="tool-btn" id="btn-expand-all">Expand all</button>
 </nav>
@@ -1669,6 +1763,7 @@ def build_html_report(result: Dict[str, Any]) -> str:
 </section>
 {governance_html}
 {llm_section_html}
+{llm_recs_section_html}
 <section id="datasets" class="datasets-section">
 {datasets_html}
 </section>
