@@ -14,6 +14,7 @@ import Confetti from '@/components/Confetti';
 import SemanticReviewPanel from '@/components/SemanticReviewPanel';
 import DQGateDashboard from '@/components/DQGateDashboard';
 import { DQGateResult } from '@/types/pipeline';
+import BusinessRequirementsPanel from '@/components/BusinessRequirementsPanel';
 
 interface ExecutionResult {
   ok: boolean;
@@ -34,7 +35,7 @@ interface ExecutionResult {
   timestamp_utc: string;
 }
 
-type Step = 'database' | 'files' | 'assessment' | 'report' | 'semantics' | 'requirements' | 'etl' | 'cleaning' | 'complete';
+type Step = 'database' | 'files' | 'business-requirements' | 'assessment' | 'report' | 'semantics' | 'requirements' | 'etl' | 'cleaning' | 'complete';
 
 function generateHtmlReportFromBackend(html: string): string {
   return html || '<!doctype html><html><head><meta charset="utf-8" /></head><body>No HTML report available.</body></html>';
@@ -262,6 +263,7 @@ export default function DataPipelinePage() {
   const steps = [
     { id: 'database', label: 'Database', icon: FaDatabase },
     { id: 'files', label: 'Files', icon: FaFileAlt },
+    { id: 'business-requirements', label: 'Business Requirements', icon: FaClipboardList },
     { id: 'assessment', label: 'Assessment', icon: FaChartBar },
     { id: 'report', label: 'DQ Gate & Report', icon: FaChartBar },
     { id: 'semantics', label: 'Semantics', icon: FaTags },
@@ -290,6 +292,11 @@ export default function DataPipelinePage() {
     setApprovedSemantics(semantics);
     setDirection('forward');
     setCurrentStep('requirements');
+  };
+
+  const handleStartBusinessRequirements = () => {
+    setDirection('forward');
+    setCurrentStep('business-requirements');
   };
 
   const handleStartAssessment = () => {
@@ -488,8 +495,21 @@ export default function DataPipelinePage() {
               <FileSelector
                 database={selectedDatabase}
                 onSelect={handleFilesSelect}
-                onNext={handleStartAssessment}
+                onNext={handleStartBusinessRequirements}
                 selectedFiles={selectedFiles}
+              />
+            )}
+
+            {currentStep === 'business-requirements' && (
+              <BusinessRequirementsPanel
+                sessionId={etlSessionId}
+                selectedDatabase={selectedDatabase!}
+                selectedFiles={selectedFiles}
+                onComplete={handleStartAssessment}
+                onBack={() => {
+                  setDirection('back');
+                  setCurrentStep('files');
+                }}
               />
             )}
 

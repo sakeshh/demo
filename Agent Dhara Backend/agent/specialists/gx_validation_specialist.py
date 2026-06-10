@@ -73,10 +73,15 @@ def _is_actual_numeric_column(col_name: str, approved_semantic_tag: Optional[str
         return False
     return True
 
+import os
+
 def get_safe_validation_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
     OOM Gating / Pre-sampling logic for production environments.
     Capping memory usage at 100MB or cell count at 1,000,000 to keep GX stable and avoid timeouts.
+    Can be configured via env vars:
+      - DHARA_MAX_VALIDATION_ROWS (default: 100000, set to 0 or -1 to disable row limits)
+      - DHARA_MAX_VALIDATION_MEM_MB (default: 100, set to 0 or -1 to disable memory limits)
     """
     row_count = len(df)
     col_count = len(df.columns)
@@ -88,15 +93,37 @@ def get_safe_validation_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     except Exception:
         mem_bytes = row_count * col_count * 8
 
-    MAX_ROWS = 100_000
-    MAX_MEM = 100 * 1024 * 1024  # 100 MB
+    # Load custom row limits from environment
+    max_rows_env = os.environ.get("DHARA_MAX_VALIDATION_ROWS")
+    if max_rows_env is not None:
+        try:
+            MAX_ROWS = int(max_rows_env)
+        except ValueError:
+            MAX_ROWS = -1
+    else:
+        MAX_ROWS = -1
 
-    if row_count > MAX_ROWS or mem_bytes > MAX_MEM:
-        target_rows = MAX_ROWS
-        if col_count > 50:
-            target_rows = min(MAX_ROWS, 50_000)
-        if col_count > 100:
-            target_rows = min(MAX_ROWS, 25_000)
+    # Load custom memory limits from environment
+    max_mem_env = os.environ.get("DHARA_MAX_VALIDATION_MEM_MB")
+    if max_mem_env is not None:
+        try:
+            val_mb = int(max_mem_env)
+            MAX_MEM = val_mb * 1024 * 1024 if val_mb > 0 else -1
+        except ValueError:
+            MAX_MEM = -1
+    else:
+        MAX_MEM = -1
+
+    # Check if limits are disabled
+    disable_rows = (MAX_ROWS <= 0)
+    disable_mem = (MAX_MEM <= 0)
+
+    if (not disable_rows and row_count > MAX_ROWS) or (not disable_mem and mem_bytes > MAX_MEM):
+        target_rows = MAX_ROWS if not disable_rows else row_count
+        if col_count > 50 and not disable_rows:
+            target_rows = min(target_rows, 50_000)
+        if col_count > 100 and not disable_rows:
+            target_rows = min(target_rows, 25_000)
         logger.info(f"OOM Protection: Sampling dataset from {row_count} rows to {target_rows} rows for GX validation.")
         return df.sample(n=target_rows, random_state=42)
     return df
@@ -200,7 +227,45 @@ def run_gx_validation(
                 for c in req_list:
                     non_nullable_set.add(str(c).lower())
 
-                # B. Column-Level Expectations
+                # Build custom assertions list for prioritizing rules
+                assertions_list = []
+                if isinstance(business_rules, dict):
+                    assertions_list.extend(business_rules.get("custom_assertions") or [])
+                    assertions_list.extend(business_rules.get("assertions") or [])
+                seen_assertions = set()
+                deduped_assertions = []
+                for r in assertions_list:
+                    if isinstance(r, dict) and r.get("assertion"):
+                        ast = r.get("assertion")
+                        if ast not in seen_assertions:
+                            seen_assertions.add(ast)
+                            deduped_assertions.append(r)
+
+                has_business_rules = False
+                if isinstance(business_rules, dict):
+                    if (business_rules.get("non_nullable") or 
+                        business_rules.get("required_columns") or 
+                        business_rules.get("valid_values") or 
+                        deduped_assertions):
+                        has_business_rules = True
+                columns_with_custom_rules = set()
+                
+                # Check valid values
+                vv = business_rules.get("valid_values") or {}
+                for col_key in vv.keys():
+                    for col in validation_df.columns:
+                        from agent.intelligent_data_assessment import match_column_key
+                        if match_column_key(col_key, name, col):
+                            columns_with_custom_rules.add(col.lower())
+
+                # Check custom assertions
+                for rule in deduped_assertions:
+                    assertion = rule.get("assertion", "")
+                    for col in validation_df.columns:
+                        pattern = r'\b' + re.escape(col) + r'\b'
+                        if re.search(pattern, assertion, re.IGNORECASE):
+                            columns_with_custom_rules.add(col.lower())
+
                 # B. Column-Level Expectations
                 for col_name in validation_df.columns:
                     meta = cols_meta.get(col_name) or {}
@@ -217,13 +282,17 @@ def run_gx_validation(
                             
                     null_pct = meta.get("null_percentage", 0.0)
 
-                    # Ensure that any null / blank values in any column (required or nullable) are fully caught
-                    # and reported in the scorecard. By running expect_column_values_to_not_be_null strictly,
-                    # the validation fails if there is any null, returning the unexpected indices of all blank/null cells.
-                    validator.expect_column_values_to_not_be_null(column=col_name)
+                    # Null check:
+                    # If business rules are active, only enforce non-null on required/non-nullable columns or candidate primary keys.
+                    # Otherwise, run it on all columns.
+                    is_required = (col_name.lower() in non_nullable_set)
+                    is_primary_key = bool(meta.get("candidate_primary_key"))
+                    
+                    if not has_business_rules or is_required or is_primary_key:
+                        validator.expect_column_values_to_not_be_null(column=col_name)
 
                     # Uniqueness / Primary Key candidates
-                    if meta.get("candidate_primary_key"):
+                    if is_primary_key:
                         validator.expect_column_values_to_be_unique(column=col_name)
 
                     # Typings & Ranges
@@ -232,7 +301,10 @@ def run_gx_validation(
                     elif "float" in dtype or "decimal" in dtype:
                         validator.expect_column_values_to_be_in_type_list(column=col_name, type_list=["float64", "float32", "float"])
 
-
+                    # If this column has a custom business rule (valid values or custom assertion),
+                    # we suppress the default semantic validations to avoid duplicate/conflicting failures.
+                    if col_name.lower() in columns_with_custom_rules:
+                        continue
 
                     # Semantic Regex
                     if semantic_type == "email":
@@ -263,6 +335,7 @@ def run_gx_validation(
                     # Suspicious zero check for ID columns (numeric or string)
                     if is_id_like:
                         validator.expect_column_values_to_not_be_in_set(column=col_name, value_set=[0, 0.0, "0", "0.0"])
+
 
 
 
@@ -511,39 +584,26 @@ def run_gx_validation(
                                         })
 
                 # 2. Custom Assertions
-                assertions_list = []
-                if isinstance(business_rules, dict):
-                    assertions_list.extend(business_rules.get("custom_assertions") or [])
-                    assertions_list.extend(business_rules.get("assertions") or [])
-                seen_assertions = set()
-                deduped_assertions = []
-                for r in assertions_list:
-                    if isinstance(r, dict) and r.get("assertion"):
-                        ast = r.get("assertion")
-                        if ast not in seen_assertions:
-                            seen_assertions.add(ast)
-                            deduped_assertions.append(r)
                 for rule in deduped_assertions:
                     assertion = rule.get("assertion")
                     custom_msg = rule.get("message")
                     try:
-                        ref_cols = [col for col in validation_df.columns if re.search(r'\b' + re.escape(col) + r'\b', assertion)]
-                        if ref_cols:
-                            res = validation_df.eval(assertion, engine='python')
-                            if isinstance(res, pd.Series):
-                                viol_mask = ~res.fillna(False)
-                                viol_cnt = int(viol_mask.sum())
-                                if viol_cnt > 0:
-                                    msg = custom_msg or f"Custom rule violation: '{assertion}' ({viol_cnt} violations)"
-                                    results_processed.append({
-                                        "expectation": "custom_rule_violation",
-                                        "column": ",".join(ref_cols),
-                                        "success": False,
-                                        "details": msg,
-                                        "unexpected_count": viol_cnt,
-                                        "unexpected_index_list": validation_df.index[viol_mask].tolist(),
-                                        "unexpected_values": validation_df.loc[viol_mask, ref_cols].head(5).to_dict(orient="records")
-                                    })
+                        from agent.intelligent_data_assessment import evaluate_custom_assertion
+                        res, ref_cols = evaluate_custom_assertion(validation_df, assertion)
+                        if isinstance(res, pd.Series):
+                            viol_mask = ~res.fillna(False)
+                            viol_cnt = int(viol_mask.sum())
+                            if viol_cnt > 0:
+                                msg = custom_msg or f"Custom rule violation: '{assertion}' ({viol_cnt} violations)"
+                                results_processed.append({
+                                    "expectation": "custom_rule_violation",
+                                    "column": ",".join(ref_cols) if ref_cols else "[Formula]",
+                                    "success": False,
+                                    "details": msg,
+                                    "unexpected_count": viol_cnt,
+                                    "unexpected_index_list": validation_df.index[viol_mask].tolist(),
+                                    "unexpected_values": validation_df.loc[viol_mask, ref_cols].head(5).to_dict(orient="records") if ref_cols else []
+                                })
                     except Exception as ex:
                         logger.error(f"Error evaluating custom assertion: {ex}")
 

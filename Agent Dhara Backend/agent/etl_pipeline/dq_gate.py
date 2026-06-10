@@ -68,6 +68,8 @@ def calculate_dataset_dq_score(assessment: Dict[str, Any], ds_name: str) -> Dict
 
     # Weighted DQ Score
     dq_score = (0.30 * null_score) + (0.30 * type_score) + (0.20 * dup_score) + (0.20 * outlier_score)
+    if null_score < 10.0:
+        dq_score = max(0.0, dq_score - 15.0)
     
     return {
         "score": round(dq_score, 2),

@@ -12,7 +12,7 @@ from agent.etl_pipeline.phase_classifier import split_plan_phases
 
 class TestScenarioMatrix(unittest.TestCase):
     def setUp(self):
-        self.fixtures_dir = r"c:\Users\ssakesh\Downloads\DHARA-GX\Agent Dhara Backend\tests\etl_scenarios\fixtures"
+        self.fixtures_dir = os.path.join(os.path.dirname(__file__), "fixtures")
         self.thresholds = load_dq_thresholds()
 
     def _load_fixture(self, name: str) -> pd.DataFrame:

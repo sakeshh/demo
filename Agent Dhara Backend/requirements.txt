@@ -73,3 +73,8 @@ clr-loader>=0.2.6
 
 # Optional: Word-to-number conversion (e.g. "one hundred" -> 100)
 word2number>=1.1
+
+# Document parsers for Business Requirements Step
+pypdf>=3.0.0
+python-docx>=0.8.11
+

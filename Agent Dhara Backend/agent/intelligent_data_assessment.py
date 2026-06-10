@@ -548,6 +548,100 @@ def get_valid_values_for_column(
     return None
 
 
+def evaluate_custom_assertion(df: pd.DataFrame, assertion: str) -> Tuple[pd.Series, List[str]]:
+    """
+    Evaluates a custom assertion expression on the DataFrame.
+    Returns a tuple of (boolean Series, list of referenced columns).
+    """
+    # 1. First attempt: standard pandas eval (very fast if it works)
+    try:
+        res = df.eval(assertion, engine='python')
+        if isinstance(res, pd.Series):
+            ref_cols = []
+            for col in df.columns:
+                pattern = r'\b' + re.escape(col) + r'\b'
+                if re.search(pattern, assertion):
+                    ref_cols.append(col)
+            return res, ref_cols
+    except Exception:
+        pass
+
+    # 2. Second attempt: fallback namespace evaluation
+    RESERVED_WORDS = {
+        "and", "or", "not", "in", "is", "if", "else", "for", "while", "def", "class",
+        "import", "from", "as", "try", "except", "finally", "with", "assert", "pd", "np",
+        "str", "int", "float", "bool", "list", "dict", "set", "tuple", "len", "sum", "min",
+        "max", "any", "all", "true", "false", "none", "nan", "isna", "isnull", "notna", "notnull"
+    }
+
+    namespace = {
+        'pd': pd,
+        'np': np,
+        'true': True,
+        'false': False,
+        'none': None,
+        'True': True,
+        'False': False,
+        'None': None
+    }
+    
+    sorted_cols = sorted(df.columns, key=len, reverse=True)
+    sanitized_assertion = assertion
+    ref_cols = []
+
+    # First, handle backticked column references (e.g. `Email ID`)
+    for col in sorted_cols:
+        backticked = f"`{col}`"
+        if backticked in sanitized_assertion:
+            safe_var = re.sub(r'[^a-zA-Z0-9_]', '_', col)
+            if not safe_var or safe_var[0].isdigit():
+                safe_var = "_" + safe_var
+            
+            sanitized_assertion = sanitized_assertion.replace(backticked, safe_var)
+            namespace[safe_var] = df[col]
+            if col not in ref_cols:
+                ref_cols.append(col)
+
+    # Second, handle non-backticked column references (case-insensitive word boundary matching)
+    for col in sorted_cols:
+        if col.lower() in RESERVED_WORDS:
+            pattern = r'\b' + re.escape(col) + r'\b'
+        else:
+            pattern = r'\b' + re.escape(col) + r'\b'
+
+        if re.search(pattern, sanitized_assertion, re.IGNORECASE):
+            safe_var = re.sub(r'[^a-zA-Z0-9_]', '_', col)
+            if not safe_var or safe_var[0].isdigit():
+                safe_var = "_" + safe_var
+            
+            sanitized_assertion = re.sub(pattern, safe_var, sanitized_assertion, flags=re.IGNORECASE)
+            namespace[safe_var] = df[col]
+            if col not in ref_cols:
+                ref_cols.append(col)
+
+    # Add any remaining columns that weren't explicitly replaced but might be in the expression
+    for col in df.columns:
+        safe_var = re.sub(r'[^a-zA-Z0-9_]', '_', col)
+        if not safe_var or safe_var[0].isdigit():
+            safe_var = "_" + safe_var
+        if safe_var not in namespace:
+            namespace[safe_var] = df[col]
+        if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', col):
+            namespace[col] = df[col]
+            namespace[col.lower()] = df[col]
+
+    try:
+        res = eval(sanitized_assertion, namespace)
+        if isinstance(res, pd.Series):
+            return res, ref_cols
+        else:
+            if isinstance(res, (bool, np.bool_)):
+                return pd.Series([res] * len(df), index=df.index), ref_cols
+            raise ValueError(f"Custom assertion did not return a boolean series or value (returned type {type(res)})")
+    except Exception as e_inner:
+        raise Exception(f"Failed to evaluate custom assertion '{assertion}' (parsed as '{sanitized_assertion}'): {str(e_inner)}")
+
+
 def check_custom_assertions(df: pd.DataFrame, rules: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Evaluates custom/formula cross-column assertions.
@@ -565,32 +659,21 @@ def check_custom_assertions(df: pd.DataFrame, rules: List[Dict[str, Any]]) -> Li
         custom_msg = rule.get("message")
         
         try:
-            ref_cols = []
-            for col in df.columns:
-                pattern = r'\b' + re.escape(col) + r'\b'
-                if re.search(pattern, assertion):
-                    ref_cols.append(col)
-                    
-            if not ref_cols:
-                continue
-                
-            res = df.eval(assertion, engine='python')
-            
-            if isinstance(res, pd.Series):
-                viol_mask = ~res.fillna(False)
-                viol_cnt = int(viol_mask.sum())
-                if viol_cnt > 0:
-                    rows = df.index[viol_mask].tolist()
-                    msg = custom_msg or f"Custom rule violation: '{assertion}' ({viol_cnt} violations)"
-                    issues.append(dq_issue(
-                        severity,
-                        "custom_rule_violation",
-                        msg,
-                        column=",".join(ref_cols),
-                        count=viol_cnt,
-                        rows=rows,
-                        sample=df.loc[viol_mask, ref_cols].head(5).to_dict(orient="records")
-                    ))
+            res, ref_cols = evaluate_custom_assertion(df, assertion)
+            viol_mask = ~res.fillna(False)
+            viol_cnt = int(viol_mask.sum())
+            if viol_cnt > 0:
+                rows = df.index[viol_mask].tolist()
+                msg = custom_msg or f"Custom rule violation: '{assertion}' ({viol_cnt} violations)"
+                issues.append(dq_issue(
+                    severity,
+                    "custom_rule_violation",
+                    msg,
+                    column=",".join(ref_cols),
+                    count=viol_cnt,
+                    rows=rows,
+                    sample=df.loc[viol_mask, ref_cols].head(5).to_dict(orient="records")
+                ))
         except Exception as e:
             issues.append(dq_issue(
                 "low",
@@ -598,6 +681,7 @@ def check_custom_assertions(df: pd.DataFrame, rules: List[Dict[str, Any]]) -> Li
                 f"Failed to evaluate custom assertion '{assertion}': {str(e)}"
             ))
     return issues
+
 
 
 def profile_database_table_full(

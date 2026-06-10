@@ -46,5 +46,51 @@
       "recommended": false,
       "description": "Add a boolean audit column to flag duplicate rows for further review before deletion."
     }
+  ],
+  "invalid_lookup_value": [
+    {
+      "id": "keep_as_is",
+      "label": "Keep as-is (skip in ETL)",
+      "action": "noop",
+      "recommended": false,
+      "description": "No transform; document in runbook."
+    },
+    {
+      "id": "cleanup_invalid_email",
+      "label": "Flag Invalid Email Addresses",
+      "action": "flag_outliers",
+      "recommended": true,
+      "description": "Add a boolean audit column to flag email addresses that are not in the allowed lookup list, allowing for manual review."
+    },
+    {
+      "id": "exclude_invalid_email",
+      "label": "Exclude Invalid Email Addresses from Output",
+      "action": "exclude_column",
+      "recommended": false,
+      "description": "Exclude the email column from the output to prevent invalid values from affecting downstream processes."
+    }
+  ],
+  "custom_rule_violation": [
+    {
+      "id": "keep_as_is",
+      "label": "Keep as-is (skip in ETL)",
+      "action": "noop",
+      "recommended": false,
+      "description": "No transform; document in runbook."
+    },
+    {
+      "id": "option_1",
+      "label": "Flag Outliers for Email Domain",
+      "action": "flag_outliers",
+      "recommended": true,
+      "description": "Add a boolean audit column to flag email addresses that do not end with @capgemini.com, allowing for manual review."
+    },
+    {
+      "id": "option_2",
+      "label": "Exclude Email Column from Output",
+      "action": "exclude_column",
+      "recommended": false,
+      "description": "Exclude the email column from the output dataset to prevent the use of invalid email addresses."
+    }
   ]
 }

@@ -17,7 +17,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -915,6 +915,44 @@ async def api_upload(
     if fmt == "md" and _build_md:
         return {"report": _build_md(result)}
     return {"result": result}
+
+
+@app.post("/business-rules/parse")
+async def api_parse_business_rules(
+    session_id: str = Form("default"),
+    text: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+) -> Dict[str, Any]:
+    """Accept text prompt and/or requirements file, parse them using LLM, and save to session."""
+    file_bytes = await file.read() if file else None
+    extracted = ""
+    if file_bytes:
+        from agent.business_requirements_parser import extract_text_from_file
+        try:
+            extracted = extract_text_from_file(file_bytes, file.filename)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
+
+    combined_text = "\n".join(x for x in (text, extracted) if x)
+    if not combined_text.strip():
+        raise HTTPException(status_code=400, detail="Provide either business requirements text or upload a document file.")
+
+    from agent.business_requirements_parser import get_dataset_schemas, parse_requirements_to_rules
+    try:
+        schemas = get_dataset_schemas(session_id)
+        rules = parse_requirements_to_rules(combined_text, schemas)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse requirements to rules: {str(e)}")
+
+    from agent.session_store import load_session, save_session
+    try:
+        sess = load_session(session_id)
+        sess.setdefault("context", {})["pending_business_rules"] = rules
+        save_session(sess)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update session context: {str(e)}")
+
+    return {"ok": True, "rules": rules, "combined_text": combined_text}
 
 
 @app.post("/etl/execute")

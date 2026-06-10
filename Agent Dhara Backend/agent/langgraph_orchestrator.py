@@ -62,6 +62,7 @@ class OrchestratorState(TypedDict, total=False):
     timings: Dict[str, Any]
     request_id: str
     approved_semantics: Dict[str, Dict[str, str]]
+    business_rules: Dict[str, Any]
 
 
 def _merge_timings(state: OrchestratorState, extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -120,6 +121,7 @@ async def _node_extract_async(state: OrchestratorState) -> OrchestratorState:
         except Exception as e:
             print(f"[ERROR] Failed to load session {session_id}: {e}")
 
+    business_rules = state.get("business_rules") or context.get("pending_business_rules") or context.get("business_rules") or {}
     user_req = (state.get("user_request") or "").lower()
     is_sql = "table" in user_req or "sql" in user_req or "database" in user_req
     is_local = "local file" in user_req or "local_file" in user_req or "filesystem" in user_req
@@ -162,6 +164,7 @@ async def _node_extract_async(state: OrchestratorState) -> OrchestratorState:
                     max_rows=None,
                     db_connectors={t: conn for t in selected_tables},
                     approved_semantics=approved_sem,
+                    business_rules=business_rules,
                 )
                 
                 label = (
@@ -207,7 +210,7 @@ async def _node_extract_async(state: OrchestratorState) -> OrchestratorState:
                 )
                 
                 approved_sem = context.get("approved_semantics") or state.get("approved_semantics")
-                result = run_assessment(cfg_text, additional_data=dfs, job_id=job_id, approved_semantics=approved_sem)
+                result = run_assessment(cfg_text, additional_data=dfs, job_id=job_id, approved_semantics=approved_sem, business_rules=business_rules)
                 
                 label = (
                     (loc.get("id") or loc.get("label") or loc.get("name") or "").strip()
@@ -286,6 +289,7 @@ async def _node_extract_async(state: OrchestratorState) -> OrchestratorState:
                     additional_data=dfs,
                     max_rows=None,
                     approved_semantics=approved_sem,
+                    business_rules=business_rules,
                 )
                 if root:
                     _override_source_root_for_datasets(result, list(dfs.keys()), os.path.abspath(root))
@@ -321,6 +325,7 @@ async def _node_extract_async(state: OrchestratorState) -> OrchestratorState:
             stream_name=state.get("stream_name") or "stream",
             job_id=state.get("job_id"),
             approved_semantics=state.get("approved_semantics"),
+            business_rules=business_rules,
         )
 
     # Normalize to JSON-serializable output (no dataclasses)
@@ -505,6 +510,7 @@ def run_orchestrator(
     job_id: str = "",
     approved_semantics: Optional[Dict[str, Dict[str, str]]] = None,
     session_id: str = "",
+    business_rules: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     High-level convenience wrapper.
@@ -522,6 +528,7 @@ def run_orchestrator(
             "timings": {},
             "approved_semantics": approved_semantics or {},
             "session_id": session_id,
+            "business_rules": business_rules or {},
         }
     )
     if job_id:

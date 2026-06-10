@@ -79,6 +79,7 @@ def run_assessment(
     job_id: Optional[str] = None,
     max_rows: Optional[int] = None,
     approved_semantics: Optional[Dict[str, Dict[str, str]]] = None,
+    business_rules: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run the full data-quality assessment from the given config string.
 
@@ -94,6 +95,7 @@ def run_assessment(
         job_id=job_id,
         max_rows=max_rows,
         approved_semantics=approved_semantics,
+        business_rules=business_rules,
     )
 
 

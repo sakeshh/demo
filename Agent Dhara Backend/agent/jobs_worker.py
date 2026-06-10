@@ -22,12 +22,23 @@ def _run_job(job: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(msgs, list) and len(msgs) > 0:
                 user_req = msgs[-1].get("content")
 
+        sid = str(inp.get("sessionId") or inp.get("session_id") or "default").strip()
+        business_rules = None
+        try:
+            from agent.session_store import load_session
+            sess = load_session(sid)
+            ctx = sess.get("context") or {}
+            business_rules = ctx.get("pending_business_rules") or ctx.get("business_rules")
+        except Exception:
+            pass
+
         state = run_orchestrator(
             user_request=str(user_req or ""),
             sources_path=str(inp.get("sources_path") or "config/sources.yaml"),
             selected_sources=inp.get("selected_sources") or [],
             job_id=job_id,
-            session_id=str(inp.get("sessionId") or inp.get("session_id") or "default").strip(),
+            session_id=sid,
+            business_rules=business_rules,
         )
 
         extractions = state.get("extractions") or []
