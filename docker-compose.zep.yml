@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  zep:
+    image: ghcr.io/getzep/zep:latest
+    ports:
+      - "8080:8080"
+    environment:
+      - ZEP_STORE_POSTGRES_DSN=postgresql://zep:zep@postgres:5432/zep
+      - ZEP_AUTH_SECRET=${ZEP_AUTH_SECRET:-zep_secret_change_me_in_production}
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: zep
+      POSTGRES_PASSWORD: zep
+      POSTGRES_DB: zep
+    volumes:
+      - zep-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  zep-postgres-data:

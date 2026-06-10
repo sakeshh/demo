@@ -930,6 +930,472 @@ def run_gx_validation(
                                     "unexpected_values": list(vals.index[:6])
                                 })
 
+                # 14. Univariate IQR Outliers
+                for col in validation_df.columns:
+                    col_meta = cols_meta.get(col) or {}
+                    semantic = (col_meta.get("semantic_type") or "").lower()
+                    dtype = str(validation_df[col].dtype).lower()
+                    if ("int" in dtype or "float" in dtype) and _is_actual_numeric_column(col, semantic):
+                        v = pd.to_numeric(validation_df[col], errors="coerce").dropna()
+                        if len(v) >= 20:
+                            q1, q3 = v.quantile(0.25), v.quantile(0.75)
+                            iqr = q3 - q1
+                            if iqr > 0:
+                                lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+                                mask = (v < lower) | (v > upper)
+                                cnt = int(mask.sum())
+                                if cnt > 0 and cnt < len(v) * 0.3:  # skip if >30% outliers (likely bimodal)
+                                    results_processed.append({
+                                        "expectation": "numeric_outliers_iqr",
+                                        "column": col,
+                                        "success": False,
+                                        "details": f"{cnt} IQR outlier(s) outside [{round(lower,2)}, {round(upper,2)}]",
+                                        "unexpected_count": cnt,
+                                        "unexpected_index_list": v.index[mask].tolist()[:50],
+                                        "unexpected_values": v[mask].head(5).tolist()
+                                    })
+
+                # 15. Z-Score Extreme Outliers (>4 standard deviations)
+                for col in validation_df.columns:
+                    col_meta = cols_meta.get(col) or {}
+                    semantic = (col_meta.get("semantic_type") or "").lower()
+                    dtype = str(validation_df[col].dtype).lower()
+                    if ("int" in dtype or "float" in dtype) and _is_actual_numeric_column(col, semantic):
+                        v = pd.to_numeric(validation_df[col], errors="coerce").dropna()
+                        if len(v) >= 20:
+                            mean, std = v.mean(), v.std()
+                            if std > 0:
+                                z = ((v - mean) / std).abs()
+                                mask = z > 4
+                                cnt = int(mask.sum())
+                                if cnt > 0 and cnt < len(v) * 0.05:  # <5% to avoid noise
+                                    results_processed.append({
+                                        "expectation": "numeric_outliers_zscore",
+                                        "column": col,
+                                        "success": False,
+                                        "details": f"{cnt} extreme outlier(s) beyond 4σ from mean ({round(mean,2)} ± {round(std,2)})",
+                                        "unexpected_count": cnt,
+                                        "unexpected_index_list": v.index[mask].tolist()[:50],
+                                        "unexpected_values": v[mask].head(5).tolist()
+                                    })
+
+                # 16. Low Variance Numeric (near-constant columns)
+                for col in validation_df.columns:
+                    col_meta = cols_meta.get(col) or {}
+                    semantic = (col_meta.get("semantic_type") or "").lower()
+                    dtype = str(validation_df[col].dtype).lower()
+                    if ("int" in dtype or "float" in dtype) and _is_actual_numeric_column(col, semantic):
+                        v = pd.to_numeric(validation_df[col], errors="coerce").dropna()
+                        if len(v) >= 20:
+                            nunique = v.nunique()
+                            if nunique <= 2 and len(v) > 50:  # only 1-2 distinct values in 50+ rows
+                                vc = v.value_counts()
+                                dominant_pct = vc.iloc[0] / len(v) * 100
+                                if dominant_pct >= 98:
+                                    results_processed.append({
+                                        "expectation": "low_variance_numeric",
+                                        "column": col,
+                                        "success": False,
+                                        "details": f"Near-constant: {nunique} unique value(s), dominant value is {round(dominant_pct,1)}% of rows",
+                                        "unexpected_count": len(v),
+                                        "unexpected_index_list": [],
+                                        "unexpected_values": list(vc.head(3).to_dict().items())
+                                    })
+
+                # 17. Numeric Precision Anomaly (mixing integers and high-precision floats)
+                for col in validation_df.columns:
+                    col_meta = cols_meta.get(col) or {}
+                    semantic = (col_meta.get("semantic_type") or "").lower()
+                    dtype = str(validation_df[col].dtype).lower()
+                    if "float" in dtype and _is_actual_numeric_column(col, semantic):
+                        v = pd.to_numeric(validation_df[col], errors="coerce").dropna()
+                        if len(v) >= 20:
+                            is_int_like = (v == v.round(0))
+                            int_pct = is_int_like.sum() / len(v) * 100
+                            # Flag if 20-80% are integers (genuine mix, not just all ints or all floats)
+                            if 20 < int_pct < 80:
+                                non_int_mask = ~is_int_like
+                                results_processed.append({
+                                    "expectation": "numeric_precision_anomaly",
+                                    "column": col,
+                                    "success": False,
+                                    "details": f"{round(int_pct,1)}% integer-like vs {round(100-int_pct,1)}% decimal — inconsistent precision",
+                                    "unexpected_count": int(non_int_mask.sum()),
+                                    "unexpected_index_list": v.index[non_int_mask].tolist()[:50],
+                                    "unexpected_values": v[non_int_mask].head(5).tolist()
+                                })
+
+                # 18. Round Number Anomaly (suspiciously round values)
+                for col in validation_df.columns:
+                    col_meta = cols_meta.get(col) or {}
+                    semantic = (col_meta.get("semantic_type") or "").lower()
+                    dtype = str(validation_df[col].dtype).lower()
+                    if ("int" in dtype or "float" in dtype) and _is_actual_numeric_column(col, semantic):
+                        v = pd.to_numeric(validation_df[col], errors="coerce").dropna()
+                        if len(v) >= 50:
+                            # Check for values that are multiples of 100 or 1000
+                            round_1000 = (v % 1000 == 0) & (v != 0)
+                            round_100 = (v % 100 == 0) & (v != 0)
+                            pct_1000 = round_1000.sum() / len(v) * 100
+                            pct_100 = round_100.sum() / len(v) * 100
+                            if pct_1000 > 30:  # >30% are multiples of 1000
+                                mask = round_1000
+                                results_processed.append({
+                                    "expectation": "round_number_anomaly",
+                                    "column": col,
+                                    "success": False,
+                                    "details": f"{round(pct_1000,1)}% of values are round multiples of 1000 — possible estimates/placeholders",
+                                    "unexpected_count": int(mask.sum()),
+                                    "unexpected_index_list": v.index[mask].tolist()[:50],
+                                    "unexpected_values": v[mask].head(5).tolist()
+                                })
+                            elif pct_100 > 50:  # >50% are multiples of 100
+                                mask = round_100
+                                results_processed.append({
+                                    "expectation": "round_number_anomaly",
+                                    "column": col,
+                                    "success": False,
+                                    "details": f"{round(pct_100,1)}% of values are round multiples of 100 — possible estimates",
+                                    "unexpected_count": int(mask.sum()),
+                                    "unexpected_index_list": v.index[mask].tolist()[:50],
+                                    "unexpected_values": v[mask].head(5).tolist()
+                                })
+
+                # 19. Future Dates
+                from datetime import datetime, timedelta
+                now = datetime.now()
+                for col_name in validation_df.columns:
+                    meta = cols_meta.get(col_name, {})
+                    semantic = (meta.get("semantic_type") or "").lower()
+                    if semantic == "date":
+                        try:
+                            dt_series = pd.to_datetime(validation_df[col_name], errors="coerce")
+                            # Convert to tz-naive if tz-aware
+                            dt_series_naive = dt_series.dt.tz_localize(None) if dt_series.dt.tz is not None else dt_series
+                            future_mask = dt_series_naive > now + timedelta(days=1)
+                            cnt = int(future_mask.sum())
+                            if cnt > 0:
+                                results_processed.append({
+                                    "expectation": "future_dates",
+                                    "column": col_name,
+                                    "success": False,
+                                    "details": f"{cnt} date(s) in the future",
+                                    "unexpected_count": cnt,
+                                    "unexpected_index_list": validation_df.index[future_mask].tolist()[:50],
+                                    "unexpected_values": dt_series[future_mask].head(5).astype(str).tolist()
+                                })
+                        except Exception:
+                            pass
+
+                # 20. Ancient Dates (before 1900)
+                ancient_cutoff = datetime(1900, 1, 1)
+                for col_name in validation_df.columns:
+                    meta = cols_meta.get(col_name, {})
+                    semantic = (meta.get("semantic_type") or "").lower()
+                    if semantic == "date":
+                        try:
+                            dt_series = pd.to_datetime(validation_df[col_name], errors="coerce")
+                            dt_series_naive = dt_series.dt.tz_localize(None) if dt_series.dt.tz is not None else dt_series
+                            ancient_mask = dt_series_naive.notna() & (dt_series_naive < ancient_cutoff)
+                            cnt = int(ancient_mask.sum())
+                            if cnt > 0:
+                                results_processed.append({
+                                    "expectation": "ancient_dates",
+                                    "column": col_name,
+                                    "success": False,
+                                    "details": f"{cnt} date(s) before 1900 — likely sentinel or data entry error",
+                                    "unexpected_count": cnt,
+                                    "unexpected_index_list": validation_df.index[ancient_mask].tolist()[:50],
+                                    "unexpected_values": dt_series[ancient_mask].head(5).astype(str).tolist()
+                                })
+                        except Exception:
+                            pass
+
+                # 21. Very Wide Date Span (>50 years)
+                for col_name in validation_df.columns:
+                    meta = cols_meta.get(col_name, {})
+                    semantic = (meta.get("semantic_type") or "").lower()
+                    if semantic == "date":
+                        try:
+                            dt_series = pd.to_datetime(validation_df[col_name], errors="coerce").dropna()
+                            dt_series_naive = dt_series.dt.tz_localize(None) if dt_series.dt.tz is not None else dt_series
+                            if len(dt_series_naive) >= 10:
+                                span_days = (dt_series_naive.max() - dt_series_naive.min()).days
+                                span_years = span_days / 365.25
+                                if span_years > 50:
+                                    results_processed.append({
+                                        "expectation": "very_wide_date_span",
+                                        "column": col_name,
+                                        "success": False,
+                                        "details": f"Date span of {round(span_years,1)} years ({dt_series_naive.min().date()} to {dt_series_naive.max().date()}) — implausible for single entity",
+                                        "unexpected_count": len(dt_series_naive),
+                                        "unexpected_index_list": [],
+                                        "unexpected_values": [str(dt_series_naive.min().date()), str(dt_series_naive.max().date())]
+                                    })
+                        except Exception:
+                            pass
+
+                # 22. Date Clumping (Jan 1 / Month-End)
+                for col_name in validation_df.columns:
+                    meta = cols_meta.get(col_name, {})
+                    semantic = (meta.get("semantic_type") or "").lower()
+                    if semantic == "date":
+                        try:
+                            dt_series = pd.to_datetime(validation_df[col_name], errors="coerce").dropna()
+                            dt_series_naive = dt_series.dt.tz_localize(None) if dt_series.dt.tz is not None else dt_series
+                            if len(dt_series_naive) >= 20:
+                                # Jan 1 clumping
+                                jan1_mask = (dt_series_naive.dt.month == 1) & (dt_series_naive.dt.day == 1)
+                                jan1_pct = jan1_mask.sum() / len(dt_series_naive) * 100
+                                if jan1_pct > 20:
+                                    results_processed.append({
+                                        "expectation": "date_clumping_jan1",
+                                        "column": col_name,
+                                        "success": False,
+                                        "details": f"{round(jan1_pct,1)}% of dates fall on January 1 — likely default/placeholder dates",
+                                        "unexpected_count": int(jan1_mask.sum()),
+                                        "unexpected_index_list": dt_series_naive.index[jan1_mask].tolist()[:50],
+                                        "unexpected_values": dt_series_naive[jan1_mask].head(5).astype(str).tolist()
+                                    })
+                                # Month-end clumping
+                                is_month_end = dt_series_naive.dt.is_month_end
+                                me_pct = is_month_end.sum() / len(dt_series_naive) * 100
+                                if me_pct > 30:
+                                    results_processed.append({
+                                        "expectation": "date_clumping_month_end",
+                                        "column": col_name,
+                                        "success": False,
+                                        "details": f"{round(me_pct,1)}% of dates fall on month-end — likely estimated/rolled-up dates",
+                                        "unexpected_count": int(is_month_end.sum()),
+                                        "unexpected_index_list": dt_series_naive.index[is_month_end].tolist()[:50],
+                                        "unexpected_values": dt_series_naive[is_month_end].head(5).astype(str).tolist()
+                                    })
+                        except Exception:
+                            pass
+
+                # 23. Weekend Business Date Anomaly
+                _BUSINESS_DATE_KEYWORDS = ("order", "payment", "ship", "invoice", "transaction", "purchase", "billing", "sale")
+                for col_name in validation_df.columns:
+                    meta = cols_meta.get(col_name, {})
+                    semantic = (meta.get("semantic_type") or "").lower()
+                    col_lower = col_name.lower()
+                    if semantic == "date" and any(k in col_lower for k in _BUSINESS_DATE_KEYWORDS):
+                        try:
+                            dt_series = pd.to_datetime(validation_df[col_name], errors="coerce").dropna()
+                            dt_series_naive = dt_series.dt.tz_localize(None) if dt_series.dt.tz is not None else dt_series
+                            if len(dt_series_naive) >= 20:
+                                is_weekend = dt_series_naive.dt.dayofweek >= 5  # Sat=5, Sun=6
+                                weekend_pct = is_weekend.sum() / len(dt_series_naive) * 100
+                                if weekend_pct > 15:  # >15% on weekends is suspicious for business dates
+                                    results_processed.append({
+                                        "expectation": "weekend_date_anomaly",
+                                        "column": col_name,
+                                        "success": False,
+                                        "details": f"{round(weekend_pct,1)}% of business dates fall on weekends",
+                                        "unexpected_count": int(is_weekend.sum()),
+                                        "unexpected_index_list": dt_series_naive.index[is_weekend].tolist()[:50],
+                                        "unexpected_values": dt_series_naive[is_weekend].head(5).astype(str).tolist()
+                                    })
+                        except Exception:
+                            pass
+
+                # 24. Timezone Inconsistency (mixing tz-aware and tz-naive)
+                for col_name in validation_df.columns:
+                    meta = cols_meta.get(col_name, {})
+                    semantic = (meta.get("semantic_type") or "").lower()
+                    if semantic == "date" and _is_text_dtype(validation_df[col_name].dtype):
+                        non_null = validation_df[col_name].dropna().astype(str)
+                        if len(non_null) >= 10:
+                            # Detect timezone indicators: +HH:MM, Z, UTC, EST, PST, etc.
+                            tz_pattern = r"[+-]\d{2}:\d{2}$|Z$|\b(?:UTC|GMT|EST|CST|MST|PST|EDT|CDT|MDT|PDT)\b"
+                            has_tz = non_null.str.contains(tz_pattern, regex=True, na=False)
+                            tz_cnt = int(has_tz.sum())
+                            no_tz_cnt = len(non_null) - tz_cnt
+                            if tz_cnt > 0 and no_tz_cnt > 0 and min(tz_cnt, no_tz_cnt) > len(non_null) * 0.05:
+                                results_processed.append({
+                                    "expectation": "timezone_inconsistency",
+                                    "column": col_name,
+                                    "success": False,
+                                    "details": f"{tz_cnt} tz-aware vs {no_tz_cnt} tz-naive datetime values — comparison errors likely",
+                                    "unexpected_count": min(tz_cnt, no_tz_cnt),
+                                    "unexpected_index_list": non_null.index[has_tz].tolist()[:50],
+                                    "unexpected_values": non_null[has_tz].head(3).tolist() + non_null[~has_tz].head(3).tolist()
+                                })
+
+                # 25. Non-ASCII Characters in Text
+                for col in validation_df.columns:
+                    if _is_text_dtype(validation_df[col].dtype):
+                        non_null = validation_df[col].dropna().astype(str)
+                        if len(non_null) >= 10:
+                            mask = non_null.str.contains(r"[^\x00-\x7F]", regex=True, na=False)
+                            cnt = int(mask.sum())
+                            if cnt > 0 and cnt < len(non_null) * 0.5:  # skip if majority has non-ASCII (likely legitimate)
+                                results_processed.append({
+                                    "expectation": "non_ascii_characters",
+                                    "column": col,
+                                    "success": False,
+                                    "details": f"{cnt} value(s) contain non-ASCII characters",
+                                    "unexpected_count": cnt,
+                                    "unexpected_index_list": non_null.index[mask].tolist()[:50],
+                                    "unexpected_values": non_null[mask].head(5).tolist()
+                                })
+
+                # 26. Control Characters in Text
+                for col in validation_df.columns:
+                    if _is_text_dtype(validation_df[col].dtype):
+                        non_null = validation_df[col].dropna().astype(str)
+                        if len(non_null) >= 5:
+                            # Match control chars except \t \n \r
+                            mask = non_null.str.contains(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", regex=True, na=False)
+                            cnt = int(mask.sum())
+                            if cnt > 0:
+                                results_processed.append({
+                                    "expectation": "control_characters_in_text",
+                                    "column": col,
+                                    "success": False,
+                                    "details": f"{cnt} value(s) contain control characters",
+                                    "unexpected_count": cnt,
+                                    "unexpected_index_list": non_null.index[mask].tolist()[:50],
+                                    "unexpected_values": non_null[mask].head(5).tolist()
+                                })
+
+                # 27. String Length Outliers (>mean + 4σ)
+                for col in validation_df.columns:
+                    if _is_text_dtype(validation_df[col].dtype):
+                        non_null = validation_df[col].dropna().astype(str)
+                        if len(non_null) >= 20:
+                            lengths = non_null.str.len()
+                            mean_len = lengths.mean()
+                            std_len = lengths.std()
+                            if std_len > 0 and mean_len > 1:
+                                threshold = mean_len + 4 * std_len
+                                mask = lengths > threshold
+                                cnt = int(mask.sum())
+                                if cnt > 0 and cnt < len(non_null) * 0.1:
+                                    results_processed.append({
+                                        "expectation": "string_length_outlier",
+                                        "column": col,
+                                        "success": False,
+                                        "details": f"{cnt} value(s) exceed {round(threshold)} chars (mean={round(mean_len)}, σ={round(std_len)})",
+                                        "unexpected_count": cnt,
+                                        "unexpected_index_list": non_null.index[mask].tolist()[:50],
+                                        "unexpected_values": non_null[mask].head(5).tolist()
+                                    })
+
+                # 28. Digits-Only Values in Text Columns
+                for col in validation_df.columns:
+                    col_meta = cols_meta.get(col) or {}
+                    semantic = (col_meta.get("semantic_type") or "").lower()
+                    col_lower = col.lower()
+                    # Only check text columns that are NOT IDs, phones, zips, etc.
+                    if (_is_text_dtype(validation_df[col].dtype) and semantic not in ("numeric_id", "id", "phone", "zip", "postal_code")
+                        and not col_lower.endswith("id") and not col_lower.endswith("code") and not col_lower.endswith("zip")):
+                        non_null = validation_df[col].dropna().astype(str).str.strip()
+                        if len(non_null) >= 10:
+                            digits_mask = non_null.str.fullmatch(r"\d+", na=False)
+                            digits_pct = digits_mask.sum() / len(non_null) * 100
+                            # Flag if 10-90% are digits-only (not all, not none)
+                            if 10 < digits_pct < 90:
+                                results_processed.append({
+                                    "expectation": "string_with_only_digits_in_text_column",
+                                    "column": col,
+                                    "success": False,
+                                    "details": f"{round(digits_pct,1)}% of values are digits-only in a text column — possible schema mismatch",
+                                    "unexpected_count": int(digits_mask.sum()),
+                                    "unexpected_index_list": non_null.index[digits_mask].tolist()[:50],
+                                    "unexpected_values": non_null[digits_mask].head(5).tolist()
+                                })
+
+                # 29. Repeated Token in Strings (e.g., "test test", "John John")
+                for col in validation_df.columns:
+                    col_lower = col.lower()
+                    if _is_text_dtype(validation_df[col].dtype) and any(k in col_lower for k in ("name", "title", "desc", "comment", "address", "label")):
+                        non_null = validation_df[col].dropna().astype(str).str.strip()
+                        if len(non_null) >= 10:
+                            def _has_repeated_token(s):
+                                tokens = s.lower().split()
+                                return len(tokens) >= 2 and len(set(tokens)) < len(tokens) and tokens[0] == tokens[1]
+                            mask = non_null.apply(_has_repeated_token)
+                            cnt = int(mask.sum())
+                            if cnt > 0:
+                                results_processed.append({
+                                    "expectation": "repeated_token_in_string",
+                                    "column": col,
+                                    "success": False,
+                                    "details": f"{cnt} value(s) with repeated leading tokens (e.g., 'John John')",
+                                    "unexpected_count": cnt,
+                                    "unexpected_index_list": non_null.index[mask].tolist()[:50],
+                                    "unexpected_values": non_null[mask].head(5).tolist()
+                                })
+
+                # 30. Implausible Age Values
+                for col in validation_df.columns:
+                    col_lower = col.lower()
+                    if any(k in col_lower for k in ("age", "_age", "age_")):
+                        v = pd.to_numeric(validation_df[col], errors="coerce").dropna()
+                        if len(v) >= 5:
+                            bad_mask = (v < 0) | (v > 150)
+                            cnt = int(bad_mask.sum())
+                            if cnt > 0:
+                                results_processed.append({
+                                    "expectation": "implausible_age",
+                                    "column": col,
+                                    "success": False,
+                                    "details": f"{cnt} age value(s) outside plausible range [0, 150]",
+                                    "unexpected_count": cnt,
+                                    "unexpected_index_list": v.index[bad_mask].tolist()[:50],
+                                    "unexpected_values": v[bad_mask].head(5).tolist()
+                                })
+
+                # 31. Implausible Percentage Values
+                for col in validation_df.columns:
+                    col_lower = col.lower()
+                    if any(k in col_lower for k in ("percent", "pct", "rate", "ratio", "share", "proportion")):
+                        v = pd.to_numeric(validation_df[col], errors="coerce").dropna()
+                        if len(v) >= 5:
+                            bad_mask = (v < 0) | (v > 100)
+                            cnt = int(bad_mask.sum())
+                            if cnt > 0:
+                                results_processed.append({
+                                    "expectation": "implausible_percentage",
+                                    "column": col,
+                                    "success": False,
+                                    "details": f"{cnt} percentage value(s) outside [0, 100]",
+                                    "unexpected_count": cnt,
+                                    "unexpected_index_list": v.index[bad_mask].tolist()[:50],
+                                    "unexpected_values": v[bad_mask].head(5).tolist()
+                                })
+
+                # 32. Case-Insensitive Duplicate Values
+                for col in validation_df.columns:
+                    col_meta = cols_meta.get(col) or {}
+                    semantic = (col_meta.get("semantic_type") or "").lower()
+                    if _is_text_dtype(validation_df[col].dtype) and semantic in ("categorical", "status", "enum"):
+                        s = validation_df[col].dropna().astype(str).str.strip()
+                        if len(s) >= 10:
+                            original_unique = s.nunique()
+                            normalized_unique = s.str.lower().nunique()
+                            if normalized_unique < original_unique:
+                                diff = original_unique - normalized_unique
+                                # Find the actual colliding values
+                                vc = s.str.lower().value_counts()
+                                collision_keys = [k for k, v in vc.items() if v > 1]
+                                collision_examples = []
+                                for k in collision_keys[:3]:
+                                    variants = s[s.str.lower() == k].unique().tolist()
+                                    if len(variants) > 1:
+                                        collision_examples.append(variants)
+                                if collision_examples:
+                                    results_processed.append({
+                                        "expectation": "duplicate_insensitive_values",
+                                        "column": col,
+                                        "success": False,
+                                        "details": f"{diff} value(s) that differ only by case/whitespace — false uniqueness",
+                                        "unexpected_count": diff,
+                                        "unexpected_index_list": [],
+                                        "unexpected_values": collision_examples[:5]
+                                    })
+
                 # Statistics rollup
                 eval_cnt = len(results_processed)
                 succ_cnt = sum(1 for r in results_processed if r["success"])

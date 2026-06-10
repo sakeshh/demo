@@ -474,7 +474,7 @@ def _route_after_dq_recommend(state: OrchestratorState) -> str:
     return "transform_suggest" if do_transform else END  # type: ignore[return-value]
 
 
-def build_orchestrator_graph():
+def build_orchestrator_graph(checkpointer=None):
     """
     Build and compile the LangGraph orchestrator.
     """
@@ -496,7 +496,15 @@ def build_orchestrator_graph():
     g.add_conditional_edges("dq_check", _route_after_dq)
     g.add_conditional_edges("dq_recommend", _route_after_dq_recommend)
     g.add_edge("transform_suggest", END)
-    return g.compile()
+    
+    if checkpointer is None:
+        try:
+            from agent.memory import get_zep_checkpointer
+            checkpointer = get_zep_checkpointer()
+        except Exception:
+            pass
+            
+    return g.compile(checkpointer=checkpointer)
 
 
 def run_orchestrator(
@@ -510,12 +518,16 @@ def run_orchestrator(
     job_id: str = "",
     approved_semantics: Optional[Dict[str, Dict[str, str]]] = None,
     session_id: str = "",
+<<<<<<< HEAD
     business_rules: Optional[Dict[str, Any]] = None,
+=======
+    checkpointer=None,
+>>>>>>> 6d0a878cfbb6c20a78e8cbc8120f7519713ebb5a
 ) -> Dict[str, Any]:
     """
     High-level convenience wrapper.
     """
-    graph = build_orchestrator_graph()
+    graph = build_orchestrator_graph(checkpointer=checkpointer)
     final = graph.invoke(
         {
             "user_request": user_request,
@@ -537,5 +549,21 @@ def run_orchestrator(
             update_job_progress(job_id, 100)
         except Exception:
             pass
+            
+    try:
+        from agent.memory import add_run_episode
+        from agent.etl_readiness_scorer import compute_etl_readiness
+        dq_res = final.get("data_quality") or {}
+        datasets = list(dq_res.get("datasets", {}).keys())
+        readiness = compute_etl_readiness(dq_res)
+        readiness_score = readiness["score"]
+        add_run_episode(
+            session_id=session_id or "default",
+            summary=f"Assessed datasets: {datasets}. DQ score: {readiness_score}.",
+        )
+    except Exception:
+        pass
+        
     return dict(final)
+
 

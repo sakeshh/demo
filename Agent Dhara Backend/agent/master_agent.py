@@ -127,6 +127,17 @@ class Plan:
     do_dq_check: bool = True
     do_dq_recommendations: bool = False
     do_transform: bool = False
+    
+    # New ETL flags
+    do_etl_plan: bool = False
+    do_etl_generate: bool = False
+    do_etl_execute: bool = False
+    
+    # New intelligence flags
+    skip_extract: bool = False            # True if schema unchanged + DQ score > threshold
+    resume_from: Optional[str] = None    # "planned" | "approved" | "generated"
+    generation_mode: str = "full"
+    engine: str = "python"
 
 
 class MasterAgent:
@@ -163,6 +174,9 @@ class MasterAgent:
                     '  "do_dq_check": boolean,\n'
                     '  "do_dq_recommendations": boolean,\n'
                     '  "do_transform": boolean,\n'
+                    '  "do_etl_plan": boolean,\n'
+                    '  "do_etl_generate": boolean,\n'
+                    '  "do_etl_execute": boolean,\n'
                     '  "reason": string\n'
                     "}\n"
                 )
@@ -199,6 +213,9 @@ class MasterAgent:
                     do_dq_check=bool(obj.get("do_dq_check", True)),
                     do_dq_recommendations=bool(obj.get("do_dq_recommendations", False)),
                     do_transform=bool(obj.get("do_transform", False)),
+                    do_etl_plan=bool(obj.get("do_etl_plan", False)),
+                    do_etl_generate=bool(obj.get("do_etl_generate", False)),
+                    do_etl_execute=bool(obj.get("do_etl_execute", False)),
                 )
             except Exception:
                 # Fall back to deterministic routing below.
@@ -255,21 +272,123 @@ class MasterAgent:
                 "fetch",
             )
         )
+        wants_etl = any(
+            k in txt
+            for k in (
+                "generate etl",
+                "etl code",
+                "build pipeline",
+                "generate pipeline",
+                "generate code",
+                "run etl",
+                "execute etl",
+            )
+        )
+        wants_execute = any(
+            k in txt
+            for k in (
+                "run etl",
+                "execute etl",
+                "execute pipeline",
+                "deploy etl",
+            )
+        )
+
+        # If user asks for ETL code generation or execution
+        if wants_etl:
+            return Plan(
+                do_extract=True,
+                do_dq_check=True,
+                do_dq_recommendations=True,
+                do_transform=True,
+                do_etl_plan=True,
+                do_etl_generate=True,
+                do_etl_execute=wants_execute,
+            )
 
         # If user asks for transform, we implicitly need DQ checks to drive suggestions.
         if wants_transform:
-            return Plan(do_extract=True, do_dq_check=True, do_dq_recommendations=True, do_transform=True)
+            return Plan(
+                do_extract=True,
+                do_dq_check=True,
+                do_dq_recommendations=True,
+                do_transform=True,
+            )
 
         # DQ requests (and assessment/profile) run extraction + DQ.
         if wants_quality:
-            return Plan(do_extract=True, do_dq_check=True, do_dq_recommendations=False, do_transform=False)
+            return Plan(
+                do_extract=True,
+                do_dq_check=True,
+                do_dq_recommendations=False,
+                do_transform=False,
+            )
 
         # If user explicitly asks only for extraction/sample, skip DQ/transform.
         if wants_extract_only:
-            return Plan(do_extract=True, do_dq_check=False, do_dq_recommendations=False, do_transform=False)
+            return Plan(
+                do_extract=True,
+                do_dq_check=False,
+                do_dq_recommendations=False,
+                do_transform=False,
+            )
 
         # Default: extract + DQ (useful baseline).
-        return Plan(do_extract=True, do_dq_check=True, do_dq_recommendations=False, do_transform=False)
+        return Plan(
+            do_extract=True,
+            do_dq_check=True,
+            do_dq_recommendations=False,
+            do_transform=False,
+        )
+
+    def plan_with_memory(
+        self,
+        user_request: str,
+        *,
+        prior_run: Optional[Dict[str, Any]] = None,
+        current_schema_hash: Optional[str] = None,
+    ) -> Plan:
+        """Memory-aware routing — uses prior_run from pipeline_runs table."""
+        base = self.plan(user_request)
+
+        # Resume: if user wants to continue and last phase is known
+        if prior_run and any(k in user_request.lower() for k in ("continue", "resume", "pick up")):
+            last_phase = prior_run.get("etl_phase", "")
+            if last_phase in ("planned", "preview_ready", "approved", "assessed"):
+                # Map "assessed" to starting etl plan
+                do_etl_p = (last_phase == "assessed")
+                do_etl_g = not do_etl_p
+                return Plan(
+                    do_extract=False,
+                    do_dq_check=False,
+                    do_dq_recommendations=False,
+                    do_transform=False,
+                    do_etl_plan=do_etl_p,
+                    do_etl_generate=do_etl_g,
+                    resume_from=last_phase,
+                    generation_mode=prior_run.get("generation_mode") or "full",
+                    engine=prior_run.get("etl_engine") or "python",
+                )
+
+        # Skip extraction if schema unchanged and DQ score is high
+        if (prior_run and current_schema_hash
+                and prior_run.get("schema_hash") == current_schema_hash
+                and int(prior_run.get("dq_score") or 0) > 85):
+            return Plan(
+                do_extract=False,
+                do_dq_check=base.do_dq_check,
+                do_dq_recommendations=base.do_dq_recommendations,
+                do_transform=base.do_transform,
+                do_etl_plan=base.do_etl_plan,
+                do_etl_generate=base.do_etl_generate,
+                do_etl_execute=base.do_etl_execute,
+                skip_extract=True,
+                generation_mode=base.generation_mode,
+                engine=base.engine,
+            )
+
+        return base
+
 
     def infer_selected_sources_from_query(self, user_request: str) -> List[str]:
         """

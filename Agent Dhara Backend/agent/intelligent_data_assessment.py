@@ -2265,6 +2265,90 @@ def analyze_dataset_quality(
             issue_type = "custom_rule_violation"
             severity = "medium"
             msg = details
+        # --- Track B: Numeric Anomalies ---
+        elif exp == "numeric_outliers_iqr":
+            issue_type = "numeric_outliers_iqr"
+            severity = "medium"
+            msg = details
+        elif exp == "numeric_outliers_zscore":
+            issue_type = "numeric_outliers_zscore"
+            severity = "high"
+            msg = details
+        elif exp == "low_variance_numeric":
+            issue_type = "low_variance_numeric"
+            severity = "low"
+            msg = details
+        elif exp == "numeric_precision_anomaly":
+            issue_type = "numeric_precision_anomaly"
+            severity = "low"
+            msg = details
+        elif exp == "round_number_anomaly":
+            issue_type = "round_number_anomaly"
+            severity = "low"
+            msg = details
+        # --- Track B: Date/Time Anomalies ---
+        elif exp == "future_dates":
+            issue_type = "future_dates"
+            severity = "high"
+            msg = details
+        elif exp == "ancient_dates":
+            issue_type = "ancient_dates"
+            severity = "medium"
+            msg = details
+        elif exp == "very_wide_date_span":
+            issue_type = "very_wide_date_span"
+            severity = "low"
+            msg = details
+        elif exp == "date_clumping_jan1":
+            issue_type = "date_clumping_jan1"
+            severity = "medium"
+            msg = details
+        elif exp == "date_clumping_month_end":
+            issue_type = "date_clumping_month_end"
+            severity = "low"
+            msg = details
+        elif exp == "weekend_date_anomaly":
+            issue_type = "weekend_date_anomaly"
+            severity = "low"
+            msg = details
+        elif exp == "timezone_inconsistency":
+            issue_type = "timezone_inconsistency"
+            severity = "medium"
+            msg = details
+        # --- Track B: Text Anomalies ---
+        elif exp == "non_ascii_characters":
+            issue_type = "non_ascii_characters"
+            severity = "low"
+            msg = details
+        elif exp == "control_characters_in_text":
+            issue_type = "control_characters_in_text"
+            severity = "medium"
+            msg = details
+        elif exp == "string_length_outlier":
+            issue_type = "string_length_outlier"
+            severity = "low"
+            msg = details
+        elif exp == "string_with_only_digits_in_text_column":
+            issue_type = "string_with_only_digits_in_text_column"
+            severity = "medium"
+            msg = details
+        elif exp == "repeated_token_in_string":
+            issue_type = "repeated_token_in_string"
+            severity = "low"
+            msg = details
+        # --- Track B: Semantic Checks ---
+        elif exp == "implausible_age":
+            issue_type = "implausible_age"
+            severity = "high"
+            msg = details
+        elif exp == "implausible_percentage":
+            issue_type = "implausible_percentage"
+            severity = "medium"
+            msg = details
+        elif exp == "duplicate_insensitive_values":
+            issue_type = "duplicate_insensitive_values"
+            severity = "low"
+            msg = details
             
         issues.append({
             "severity": severity,

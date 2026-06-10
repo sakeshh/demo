@@ -46,3 +46,7 @@ next-env.d.ts
 
 # sources config (contains secrets)
 Agent Dhara Backend/config/sources.yaml
+
+# SQLite checkpointer
+Agent Dhara Backend/agent/data/checkpointer.db
+

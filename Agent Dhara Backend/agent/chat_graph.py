@@ -1733,6 +1733,279 @@ def _node_extract_columns(state: ChatState) -> ChatState:
     }
 
 
+from pydantic import BaseModel, Field
+from typing import Literal, Optional, List
+import numpy as np
+import os
+try:
+    from langgraph.types import interrupt, Command
+except ImportError:
+    interrupt = None
+    Command = None
+
+class UserIntent(BaseModel):
+    category: Literal["profile", "clean", "etl_gen", "explain", "status", "chat", "unclear"] = Field(
+        description="The primary classified intent of the user message"
+    )
+    target_table: Optional[str] = Field(description="Name of the table or file referenced, if any")
+    confidence: float = Field(description="Confidence score between 0.0 and 1.0")
+    clarification_needed: bool = Field(description="True if the intent is ambiguous or needs user clarification")
+    clarification_question: Optional[str] = Field(description="A friendly clarifying question to ask the user")
+    suggested_options: Optional[List[str]] = Field(description="List of choice buttons (options) to present to the user")
+
+SEMANTIC_UTTERANCES = {
+    "view data": ("set_action", {"action": "view"}),
+    "preview table data": ("preview_table", {"n": 10}),
+    "generate data quality report": ("generate_report_selected", {}),
+    "restart session": ("reset_flow", {}),
+    "go back one step": ("back_flow", {}),
+    "show column schemas": ("show_schema", {}),
+    "show table metadata and rows": ("show_metadata", {}),
+    "show nulls and missing values": ("show_null_columns", {}),
+    "find duplicate records": ("dq_duplicates", {}),
+    "cleaning recommendations": ("show_cleaning_recommendations", {}),
+    "suggested transformations": ("show_transform_suggestions", {}),
+    "show relationships and foreign keys": ("relationships_overview", {}),
+    "show current table selection": ("show_selection_status", {}),
+    "build etl transformation plan": ("build_etl_plan", {}),
+    "generate cleaning etl code": ("generate_etl_code", {}),
+    "download generated etl code": ("download_etl_code", {}),
+    "what does this column mean": ("discover_semantic_rules", {}),
+    "discover semantic rules": ("discover_semantic_rules", {}),
+}
+
+_EMBEDDING_CACHE = {}
+
+def _get_embeddings():
+    cfg = load_llm_config(purpose="router")
+    if not cfg:
+        return None
+    try:
+        if cfg.provider == "azure_openai":
+            from langchain_openai import AzureOpenAIEmbeddings
+            dep = os.getenv("AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT") or "text-embedding-ada-002"
+            return AzureOpenAIEmbeddings(
+                azure_endpoint=cfg.endpoint,
+                azure_deployment=dep,
+                api_version=cfg.api_version or "2024-02-01",
+                api_key=cfg.api_key,
+            )
+        else:
+            from langchain_openai import OpenAIEmbeddings
+            model = os.getenv("OPENAI_EMBEDDINGS_MODEL") or "text-embedding-ada-002"
+            return OpenAIEmbeddings(
+                api_key=cfg.api_key,
+                model=model,
+            )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Could not initialize embeddings: {e}")
+        return None
+
+def get_semantic_match(user_message: str) -> Optional[Tuple[str, Dict[str, Any]]]:
+    global _EMBEDDING_CACHE
+    try:
+        embeddings = _get_embeddings()
+        if not embeddings:
+            return None
+            
+        if not _EMBEDDING_CACHE:
+            phrases = list(SEMANTIC_UTTERANCES.keys())
+            phrase_vectors = embeddings.embed_documents(phrases)
+            for phrase, vec in zip(phrases, phrase_vectors):
+                _EMBEDDING_CACHE[phrase] = np.array(vec)
+                
+        user_vec = np.array(embeddings.embed_query(user_message))
+        best_phrase = None
+        best_score = -1.0
+        
+        for phrase, vec in _EMBEDDING_CACHE.items():
+            score = np.dot(user_vec, vec) / (np.linalg.norm(user_vec) * np.linalg.norm(vec))
+            if score > best_score:
+                best_score = score
+                best_phrase = phrase
+                
+        import logging
+        logging.getLogger(__name__).info(f"Semantic router: best match phrase='{best_phrase}' with score={best_score:.4f}")
+        
+        if best_score > 0.88:
+            return SEMANTIC_UTTERANCES[best_phrase]
+            
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Semantic pre-routing failed: {e}")
+        
+    return None
+
+def _get_llm_client_langchain():
+    cfg = load_llm_config(purpose="router")
+    if cfg is None:
+        return None
+    try:
+        if cfg.provider == "azure_openai":
+            from langchain_openai import AzureChatOpenAI
+            return AzureChatOpenAI(
+                azure_endpoint=cfg.endpoint,
+                azure_deployment=cfg.model,
+                api_version=cfg.api_version or "2024-02-01",
+                api_key=cfg.api_key,
+                temperature=0.0,
+                max_tokens=300,
+            )
+        else:
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                api_key=cfg.api_key,
+                model=cfg.model,
+                temperature=0.0,
+                max_tokens=300,
+            )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("LangChain LLM client unavailable: %s", exc)
+        return None
+
+def _classify_intent_structured(user_message: str, session: Dict[str, Any]) -> Optional[UserIntent]:
+    llm = _get_llm_client_langchain()
+    if llm is None:
+        return None
+    try:
+        structured_llm = llm.with_structured_output(UserIntent)
+        
+        ctx = (session or {}).get("context", {}) if isinstance(session, dict) else {}
+        selected_tables = ctx.get("selected_tables") or []
+        available_tables = ctx.get("last_table_list") or []
+        selected_locals = ctx.get("selected_local_files") or []
+        available_locals = ctx.get("last_local_file_list") or []
+        selected_blobs = ctx.get("selected_blob_files") or []
+        available_blobs = ctx.get("last_blob_list") or []
+        
+        options_list = list(set(available_tables + available_locals + available_blobs))
+        
+        system_prompt = f"""You are Agent Dhara's conversational intent routing supervisor.
+Based on the user's message and the session context, classify their intent and identify target table/file.
+
+Categories:
+- "profile": user wants to explore/run assessment/generate a report on datasets/tables/files.
+- "clean": user wants to clean data or get cleaning/transformation recommendations.
+- "etl_gen": user wants to build ETL plans, generate code, download code, or plan pipelines.
+- "explain": user asks to explain a report, column meanings, business rules, or relationships between datasets.
+- "status": user wants to see what's currently selected or selection status.
+- "chat": general chatter, greetings, hello, help menu.
+- "unclear": anything ambiguous, out-of-domain, or needing clarification.
+
+Context:
+- Selected tables: {selected_tables}
+- Available tables: {available_tables}
+- Selected local files: {selected_locals}
+- Available local files: {available_locals}
+- Selected blob files: {selected_blobs}
+- Available blob files: {available_blobs}
+
+Instructions:
+1. If the user message references an action on a dataset/table/file, check if they specified which one.
+2. If multiple datasets/tables/files are available but none or too many are selected, or if the target is ambiguous, set:
+   - `clarification_needed = True`
+   - `clarification_question = "Which table or dataset do you want to work on?"`
+   - `suggested_options = {options_list}`
+3. If they specified a table/file (or it's already selected/unambiguous), set target_table and set clarification_needed = False.
+4. Keep the target_table name matching exactly the name in the available list.
+5. Focus only on data validation, profiling, cleaning, and ETL.
+"""
+        from langchain_core.messages import SystemMessage, HumanMessage
+        return structured_llm.invoke([
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_message)
+        ])
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Structured intent routing failed: {e}")
+        return None
+
+def map_intent_to_action(intent: UserIntent, msg: str, ctx: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    if intent.clarification_needed:
+        orig = "help"
+        if intent.category == "clean":
+            orig = "show_cleaning_recommendations"
+        elif intent.category == "profile":
+            orig = "generate_report_selected" if not ctx.get("selected_blob_files") else "generate_report_selected_files"
+        elif intent.category == "explain":
+            orig = "summarize_report"
+        
+        return "convo_clarify", {
+            "question": intent.clarification_question or "Please clarify which table you want to work on.",
+            "options": intent.suggested_options or [],
+            "original_action": orig
+        }
+        
+    low = msg.lower()
+    
+    if intent.category == "status":
+        return "show_selection_status", {}
+        
+    if intent.category == "chat":
+        return "help", {}
+        
+    if intent.target_table:
+        tables = ctx.get("last_table_list") or []
+        blobs = ctx.get("last_blob_list") or []
+        locals_list = ctx.get("last_local_file_list") or []
+        
+        matched_name = None
+        for t in tables:
+            if t.lower() == intent.target_table.lower():
+                matched_name = t
+                ctx["selected_table"] = t
+                ctx["selected_tables"] = [t]
+                break
+        if not matched_name:
+            for b in blobs:
+                if b.lower() == intent.target_table.lower():
+                    matched_name = b
+                    ctx["selected_blob_files"] = [b]
+                    break
+        if not matched_name:
+            for l in locals_list:
+                if l.lower() == intent.target_table.lower():
+                    matched_name = l
+                    ctx["selected_local_files"] = [l]
+                    break
+            
+    if intent.category == "profile":
+        has_files = bool(ctx.get("selected_blob_files") or ctx.get("selected_local_files"))
+        if "schema" in low:
+            return "show_file_schema" if has_files else "show_schema", {}
+        if "meta" in low:
+            return "show_file_metadata" if has_files else "show_metadata", {}
+        if "preview" in low or "row" in low or "view" in low:
+            return "preview_selected_file" if has_files else "preview_table", {"n": 10}
+        return "generate_report_selected_files" if has_files else "generate_report_selected", {}
+        
+    if intent.category == "clean":
+        if "suggest" in low or "transform" in low or "fix" in low:
+            return "show_transform_suggestions", {}
+        return "show_cleaning_recommendations", {}
+        
+    if intent.category == "explain":
+        if "relationship" in low or "join" in low or "cardinality" in low or "foreign" in low:
+            return "relationships_overview", {}
+        if "rule" in low or "discover" in low or "semantic" in low:
+            return "discover_semantic_rules", {}
+        return "summarize_report", {}
+        
+    if intent.category == "etl_gen":
+        if "download" in low or "script" in low:
+            return "download_etl_code", {}
+        if "approve" in low or "confirm" in low or "yes" in low:
+            return "confirm_etl_plan", {}
+        if "show" in low or "plan" in low:
+            return "show_etl_plan", {}
+        if "generate" in low or "code" in low or "clean" in low:
+            return "generate_etl_code", {}
+        return "build_etl_plan", {}
+        
+    return "help", {}
+
 def _llm_plan(*, user_text: str, session: Dict[str, Any]) -> Dict[str, Any]:
     cfg = load_llm_config(purpose="router")
     if not cfg:
@@ -1824,10 +2097,14 @@ def _llm_plan(*, user_text: str, session: Dict[str, Any]) -> Dict[str, Any]:
 def _node_load_session(state: ChatState) -> ChatState:
     sid = (state.get("session_id") or "default").strip() or "default"
     sess = load_session(sid)
-    return {"session_id": sid, "session": sess}
+    return {"session_id": sid, "session": sess, "action": None, "action_args": None}
 
 
 def _node_route(state: ChatState) -> ChatState:
+    # Check if action is already decided (from resumption)
+    if state.get("action") and state.get("action") not in ("route", "convo_clarify"):
+        return {"action": state.get("action"), "action_args": state.get("action_args") or {}}
+
     # Deterministic navigation commands (do not send to LLM router).
     raw = (state.get("message", "") or "").strip().lower()
     # Greetings / empty chatter should start the guided flow (avoid LLM picking list_sources).
@@ -1837,6 +2114,50 @@ def _node_route(state: ChatState) -> ChatState:
         return {"action": "back_flow", "action_args": {}}
     if raw in ("restart", "reset", "start over"):
         return {"action": "reset_flow", "action_args": {}}
+
+    # Step 1 shortcuts: data source selection by NL or number.
+    # These should ALWAYS work (even mid-flow) so the UI buttons can't accidentally
+    # route into NL→SQL or other actions based on stale session context.
+    sess = state.get("session") or {}
+    ctx = sess.get("context", {}) if isinstance(sess, dict) else {}
+    want = None
+    if raw in ("1", "sql", "sql database", "database", "sql data", "sql_data", "apis", "api"):
+        want = "database"
+    elif raw in ("2", "blob", "azure blob", "azure blob storage", "blob data", "blob_data"):
+        want = "azure_blob"
+    elif raw in ("3", "file stream", "filesystem", "file", "stream", "local", "local files", "local file", "local data", "local_data", "streams", "real-time streams", "real-time stream"):
+        want = "filesystem"
+    if want:
+        # Clear stale selections so the new data source starts cleanly.
+        if isinstance(ctx, dict):
+            for k in (
+                "selected_source_index",
+                "selected_db_location_index",
+                "selected_blob_location_index",
+                "selected_fs_location_index",
+                "selected_action",
+                "selected_table",
+                "selected_tables",
+                "selected_blob_files",
+                "selected_local_files",
+                "last_table_list",
+                "last_blob_list",
+                "last_local_file_list",
+            ):
+                ctx.pop(k, None)
+        sources_path = (ctx.get("sources_path") or "config/sources.yaml") if isinstance(ctx, dict) else "config/sources.yaml"
+        source_root = load_sources_config(sources_path)
+        idx = _first_location_index(source_root, want)
+        if idx is None:
+            return {"action": "help", "action_args": {}}
+        return {"action": "select_source", "action_args": {"index": idx}}
+
+    # Step 2 shortcuts: action selection without LLM.
+    if (ctx or {}).get("selected_source_index") is not None and (ctx or {}).get("selected_action") is None:
+        if raw in ("view data", "view", "1"):
+            return {"action": "set_action", "action_args": {"action": "view"}}
+        if raw in ("generate report", "report", "2"):
+            return {"action": "set_action", "action_args": {"action": "report"}}
     # Route "schema/metadata/report/preview" to table vs file handlers based on current selection.
     sess = state.get("session") or {}
     ctx = sess.get("context", {}) if isinstance(sess, dict) else {}
@@ -2004,49 +2325,19 @@ def _node_route(state: ChatState) -> ChatState:
     if ("show columns" in raw or "list columns" in raw or (("columns" in raw or "fields" in raw) and "show" in raw)) and "null" not in raw:
         return {"action": "extract_columns", "action_args": {}}
 
-    # Step 1 shortcuts: data source selection by NL or number.
-    # These should ALWAYS work (even mid-flow) so the UI buttons can't accidentally
-    # route into NL→SQL or other actions based on stale session context.
-    sess = state.get("session") or {}
-    ctx = sess.get("context", {}) if isinstance(sess, dict) else {}
-    want = None
-    if raw in ("1", "sql", "sql database", "database"):
-        want = "database"
-    elif raw in ("2", "blob", "azure blob", "azure blob storage"):
-        want = "azure_blob"
-    elif raw in ("3", "file stream", "filesystem", "file", "stream"):
-        want = "filesystem"
-    if want:
-        # Clear stale selections so the new data source starts cleanly.
-        if isinstance(ctx, dict):
-            for k in (
-                "selected_source_index",
-                "selected_db_location_index",
-                "selected_blob_location_index",
-                "selected_fs_location_index",
-                "selected_action",
-                "selected_table",
-                "selected_tables",
-                "selected_blob_files",
-                "selected_local_files",
-                "last_table_list",
-                "last_blob_list",
-                "last_local_file_list",
-            ):
-                ctx.pop(k, None)
-        sources_path = (ctx.get("sources_path") or "config/sources.yaml") if isinstance(ctx, dict) else "config/sources.yaml"
-        source_root = load_sources_config(sources_path)
-        idx = _first_location_index(source_root, want)
-        if idx is None:
-            return {"action": "help", "action_args": {}}
-        return {"action": "select_source", "action_args": {"index": idx}}
 
-    # Step 2 shortcuts: action selection without LLM.
-    if (ctx or {}).get("selected_source_index") is not None and (ctx or {}).get("selected_action") is None:
-        if raw in ("view data", "view", "1"):
-            return {"action": "set_action", "action_args": {"action": "view"}}
-        if raw in ("generate report", "report", "2"):
-            return {"action": "set_action", "action_args": {"action": "report"}}
+
+    # Semantic pre-routing (embedding cosine similarity)
+    match = get_semantic_match(raw)
+    if match:
+        act, args = match
+        return {"action": act, "action_args": args}
+
+    # Structured intent routing (LLM classification with Pydantic)
+    intent = _classify_intent_structured(state.get("message", ""), state.get("session") or {})
+    if intent is not None:
+        act, args = map_intent_to_action(intent, state.get("message", ""), ctx)
+        return {"action": act, "action_args": args}
 
     plan = _llm_plan(user_text=state.get("message", ""), session=state.get("session") or {})
     out_r: ChatState = {
@@ -3922,17 +4213,55 @@ def _node_convo_cross_dataset(state: ChatState) -> ChatState:
 
 
 def _node_convo_clarify(state: ChatState) -> ChatState:
-    from agent.specialists.clarification_node import format_clarification
-
-    ctx = state["session"].get("context", {}) if isinstance(state.get("session"), dict) else {}
-    if not isinstance(ctx, dict):
-        ctx = {}
-    txt = format_clarification(state.get("message") or "", ctx)
-    meta = state.get("action_args") or {}
-    return {
-        "reply": txt,
-        "payload": {"step": "convo", "intent": "clarify", "intent_meta": meta, "options": _convo_followup_options()},
-    }
+    args = state.get("action_args") or {}
+    question = args.get("question") or "Please clarify which table you want to work on."
+    options = args.get("options") or []
+    original_action = args.get("original_action")
+    
+    if interrupt is not None:
+        res_val = interrupt({
+            "question": question,
+            "options": options
+        })
+        
+        sess = state.get("session") or {}
+        ctx = sess.setdefault("context", {})
+        
+        tables = ctx.get("last_table_list") or []
+        blobs = ctx.get("last_blob_list") or []
+        locals_list = ctx.get("last_local_file_list") or []
+        
+        if res_val in tables:
+            ctx["selected_table"] = res_val
+            ctx["selected_tables"] = [res_val]
+        elif res_val in blobs:
+            ctx["selected_blob_files"] = [res_val]
+        elif res_val in locals_list:
+            ctx["selected_local_files"] = [res_val]
+            
+        if res_val not in tables:
+            ctx.pop("selected_table", None)
+            ctx.pop("selected_tables", None)
+        if res_val not in blobs:
+            ctx.pop("selected_blob_files", None)
+        if res_val not in locals_list:
+            ctx.pop("selected_local_files", None)
+            
+        return {
+            "action": original_action or "help",
+            "action_args": {},
+            "session": sess
+        }
+    else:
+        from agent.specialists.clarification_node import format_clarification
+        ctx = state["session"].get("context", {}) if isinstance(state.get("session"), dict) else {}
+        if not isinstance(ctx, dict):
+            ctx = {}
+        txt = format_clarification(state.get("message") or "", ctx)
+        return {
+            "reply": txt,
+            "payload": {"step": "convo", "intent": "clarify", "intent_meta": args, "options": _convo_followup_options()},
+        }
 
 
 def _node_convo_boundary_ood(state: ChatState) -> ChatState:
@@ -4038,7 +4367,21 @@ def _node_capture_business_rules(state: ChatState) -> ChatState:
     msg = state.get("message") or ""
     reply = chat_capture_business_rules(sid, msg)
     state["session"] = load_session(sid)
+    
+    # ── NEW: persist to Zep as entity fact ──────────────────────────
+    try:
+        from agent.memory import remember_fact
+        sess = state["session"]
+        ctx = sess.get("context", {})
+        datasets = (ctx.get("selected_tables") or ctx.get("selected_local_files") or [])
+        entity = datasets[0] if datasets else ""
+        remember_fact(session_id=sid, fact=msg, entity=entity)
+    except Exception:
+        pass
+    # ─────────────────────────────────────────────────────────────────
+    
     return {"reply": reply, "payload": {"step": "etl", "intent": "capture_business_rules"}}
+
 
 
 def _node_download_etl_code(state: ChatState) -> ChatState:
@@ -4181,7 +4524,7 @@ def _node_discover_semantic_rules(state: ChatState) -> ChatState:
     return {"reply": reply, "payload": {"step": "etl", "intent": "discover_semantic_rules"}}
 
 
-def build_chat_graph():
+def build_chat_graph(checkpointer=None):
     if StateGraph is None or END is None:
         raise ImportError("LangGraph not available")
     g = StateGraph(ChatState)
@@ -4351,7 +4694,6 @@ def build_chat_graph():
         "convo_issue_filter",
         "convo_triage",
         "convo_cross_dataset",
-        "convo_clarify",
         "convo_boundary_ood",
         "convo_boundary_adv",
         "convo_etl_guidance",
@@ -4364,13 +4706,45 @@ def build_chat_graph():
         "discover_semantic_rules",
     ):
         g.add_edge(n, "save_session")
+    g.add_edge("convo_clarify", "route")
     g.add_edge("save_session", END)
-    return g.compile()
+    if checkpointer is None:
+        try:
+            from agent.memory import get_zep_checkpointer
+            checkpointer = get_zep_checkpointer()
+        except Exception:
+            pass
+            
+    if checkpointer is None:
+        try:
+            import sqlite3
+            import os
+            from langgraph.checkpoint.sqlite import SqliteSaver
+            here = os.path.dirname(os.path.abspath(__file__))
+            db_dir = os.path.join(here, "data")
+            os.makedirs(db_dir, exist_ok=True)
+            db_path = os.path.join(db_dir, "checkpointer.db")
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            checkpointer = SqliteSaver(conn)
+            checkpointer.setup()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Could not initialize SqliteSaver: {e}")
+            
+    return g.compile(checkpointer=checkpointer)
 
 
-def run_chat(*, session_id: str, message: str, job_id: Optional[str] = None) -> Dict[str, Any]:
-    graph = build_chat_graph()
-    raw = dict(graph.invoke({"session_id": session_id, "message": message, "job_id": job_id}))
+def run_chat(*, session_id: str, message: str, job_id: Optional[str] = None, thread_id: Optional[str] = None, resume_value: Optional[str] = None, checkpointer=None) -> Dict[str, Any]:
+    graph = build_chat_graph(checkpointer=checkpointer)
+    
+    tid = thread_id or session_id or "default"
+    config = {"configurable": {"thread_id": tid}}
+    
+    if resume_value is not None:
+        raw = dict(graph.invoke(Command(resume=resume_value), config))
+    else:
+        raw = dict(graph.invoke({"session_id": session_id, "message": message, "job_id": job_id}, config))
+        
     # Merge LangGraph-side LLM usage into API payload for the frontend footer.
     pl = dict(raw.get("payload") or {})
     lum = dict(pl.get("llm_usage") or {})
@@ -4382,14 +4756,39 @@ def run_chat(*, session_id: str, message: str, job_id: Optional[str] = None) -> 
         lum["nl_sql"] = nlu
     if lum:
         pl["llm_usage"] = lum
+        
+    # Check if we were interrupted
+    interrupts = raw.get("__interrupt__")
+    if interrupts:
+        first_interrupt = interrupts[0]
+        val = first_interrupt.value
+        if isinstance(val, dict):
+            question = val.get("question")
+            options = val.get("options") or []
+            flow_options = [{"id": o, "text": o, "send": o} for o in options]
+            return {
+                "reply": question,
+                "payload": {
+                    "step": "convo_clarify",
+                    "status": "paused",
+                    "clarification_card": {
+                        "question": question,
+                        "options": options
+                    },
+                    "options": flow_options,
+                    "thread_id": tid
+                }
+            }
+            
     # Do not return the full graph state (especially `session` + last_assessment_result) as the
     # async job result: it can be megabytes and breaks polling via Next.js proxy (timeouts / aborts).
     out: Dict[str, Any] = {
         "reply": raw.get("reply") if isinstance(raw.get("reply"), str) else "",
         "payload": pl,
     }
-    tid = raw.get("threadId")
-    if tid is not None:
-        out["threadId"] = tid
+    tid_out = raw.get("threadId") or tid
+    if tid_out is not None:
+        out["threadId"] = tid_out
     return out
+
 

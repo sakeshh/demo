@@ -1,7 +1,14 @@
 {
+<<<<<<< HEAD
     "ndta.csv": {
         "id": "str",
         "name": "str",
         "email": "str"
+=======
+    "data_quality_issues.csv": {
+        "id": "object",
+        "name": "object",
+        "email": "object"
+>>>>>>> 6d0a878cfbb6c20a78e8cbc8120f7519713ebb5a
     }
 }

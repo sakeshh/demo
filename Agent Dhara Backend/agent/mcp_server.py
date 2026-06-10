@@ -100,6 +100,8 @@ class SemanticInferencePayload(BaseModel):
 class ChatPayload(BaseModel):
     session_id: Optional[str] = "default"
     message: str
+    thread_id: Optional[str] = None
+    resume_value: Optional[str] = None
 
 
 class SessionContextPayload(BaseModel):
@@ -159,6 +161,18 @@ class TestConnectionPayload(BaseModel):
 class ExecutionApprovalPayload(BaseModel):
     session_id: str
     approved: bool
+
+
+class PipelineRunPayload(BaseModel):
+    session_id: Optional[str] = "default"
+    user_request: Optional[str] = ""
+    sources_path: Optional[str] = None
+    sources: Optional[List[str]] = None
+    generation_mode: Optional[str] = "full"
+    engine: Optional[str] = "python"
+    business_rules: Optional[Dict[str, Any]] = None
+    job_id: Optional[str] = ""
+
 
 
 setup_logging()
@@ -427,7 +441,27 @@ def api_assess(payload: AssessPayload, request: Request) -> Dict[str, Any]:
     sess.setdefault("context", {})["last_assessment_result"] = result
     save_session(sess)
 
+    try:
+        from agent.session_store import save_pipeline_run
+        from agent.etl_readiness_scorer import compute_etl_readiness
+        from agent.etl_handlers import _assessment_schema_signature
+        datasets = list((result.get("datasets") or {}).keys())
+        readiness = compute_etl_readiness(result)
+        schema_hash = _assessment_schema_signature(result)
+        save_pipeline_run(
+            session_id=session_id,
+            dataset_names=datasets,
+            schema_hash=schema_hash,
+            dq_score=readiness["score"],
+            dq_issue_count=len(readiness["blockers"]) + len(readiness["warnings"]),
+            etl_phase="assessed",
+            notes=readiness["etl_recommendation"],
+        )
+    except Exception:
+        pass   # never block assessment on memory write failure
+
     return {"ok": True, "result": result}
+
 
 
 @app.post("/chat")
@@ -438,19 +472,32 @@ def api_chat(payload: ChatPayload) -> Dict[str, Any]:
     from agent.chat_graph import run_chat
 
     sid = (payload.session_id or "default").strip() or "default"
-    out = run_chat(session_id=sid, message=payload.message)
+    tid = payload.thread_id or sid
+    out = run_chat(
+        session_id=sid,
+        message=payload.message,
+        thread_id=tid,
+        resume_value=payload.resume_value
+    )
     try:
         logger.info(
             "chat_routed",
             extra={
                 "session_id": sid,
+                "thread_id": tid,
                 "message": (payload.message or "")[:200],
                 "action": out.get("action"),
             },
         )
     except Exception:
         pass
-    return {"ok": True, "reply": out.get("reply"), "payload": out.get("payload") or {}, "session_id": sid}
+    return {
+        "ok": True,
+        "reply": out.get("reply"),
+        "payload": out.get("payload") or {},
+        "session_id": sid,
+        "thread_id": tid
+    }
 
 
 @app.get("/sessions")
@@ -967,6 +1014,22 @@ def api_etl_execute(payload: EtlExecutePayload) -> Dict[str, Any]:
     return res
 
 
+@app.post("/etl/run-full")
+def api_etl_run_full(payload: EtlPlanPayload) -> Dict[str, Any]:
+    """Single-call ETL: plan → confirm → generate in one graph invocation."""
+    from agent.etl_graph import run_etl_graph
+    state = run_etl_graph(
+        session_id=payload.session_id or "default",
+        generation_mode=payload.generation_mode or "full",
+        engine=payload.engine or "python",
+        sql_dialect=payload.sql_dialect or "tsql",
+        business_rules=payload.business_rules or {},
+        assessment_result=payload.assessment_result,
+    )
+    return {"ok": bool(state.get("ok")), "state": state}
+
+
+
 @app.get("/etl/execution-status/{session_id}")
 def api_etl_execution_status_route(session_id: str) -> Dict[str, Any]:
     from agent.session_store import load_session
@@ -1001,6 +1064,71 @@ def api_etl_execution_approval(payload: ExecutionApprovalPayload) -> Dict[str, A
         "session_id": sid,
         "approved": bool(payload.approved)
     }
+
+
+@app.get("/pipeline/history/{session_id}")
+def api_pipeline_history(session_id: str) -> Dict[str, Any]:
+    from agent.session_store import _connect
+    import json
+    sid = (session_id or "default").strip() or "default"
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, session_id, run_ts, dataset_names, schema_hash, dq_score, "
+            "dq_issue_count, etl_phase, etl_engine, etl_outcome, generation_mode, notes "
+            "FROM pipeline_runs WHERE session_id = ? ORDER BY run_ts DESC",
+            (sid,)
+        ).fetchall()
+        
+        runs = []
+        for r in rows:
+            try:
+                ds_list = json.loads(r[3] or "[]")
+            except Exception:
+                ds_list = []
+            runs.append({
+                "id": r[0],
+                "session_id": r[1],
+                "run_ts": r[2],
+                "dataset_names": ds_list,
+                "schema_hash": r[4],
+                "dq_score": r[5],
+                "dq_issue_count": r[6],
+                "etl_phase": r[7],
+                "etl_engine": r[8],
+                "etl_outcome": r[9],
+                "generation_mode": r[10],
+                "notes": r[11],
+            })
+        
+        return {"ok": True, "session_id": sid, "history": runs}
+    finally:
+        conn.close()
+
+
+@app.post("/pipeline/run")
+def api_pipeline_run(payload: PipelineRunPayload, request: Request) -> Dict[str, Any]:
+    """
+    Unified entry point: assess + ETL in one graph invocation.
+    Feature-flagged: DHARA_UNIFIED_PIPELINE=1
+    """
+    import os
+    if not os.getenv("DHARA_UNIFIED_PIPELINE"):
+        raise HTTPException(status_code=404, detail="Unified pipeline not enabled")
+    from agent.unified_graph import run_unified_graph
+    
+    return run_unified_graph(
+        session_id=payload.session_id or "default",
+        user_request=payload.user_request or "",
+        sources_path=payload.sources_path or "config/sources.yaml",
+        selected_sources=payload.sources or [],
+        generation_mode=payload.generation_mode or "full",
+        engine=payload.engine or "python",
+        business_rules=payload.business_rules or {},
+        job_id=payload.job_id or "",
+    )
+
+
 
 
 if __name__ == "__main__":

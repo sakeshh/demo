@@ -473,6 +473,21 @@ def etl_plan_start(
         merged_raw = {**(pending or {}), **(business_rules if isinstance(business_rules, dict) else {})}
     rules_merged = merge_business_rules_for_datasets(merged_raw, ds_names, tenant_id=tid)
 
+    # ── Zep memory: inject recalled dataset facts ────────────────────
+    try:
+        from agent.memory import recall_dataset_facts
+        zep_facts = []
+        for ds in ds_names[:3]:
+            zep_facts.extend(recall_dataset_facts(user_id=sid, dataset_name=ds))
+        if zep_facts:
+            existing_notes = rules_merged.get("notes") or ""
+            rules_merged["notes"] = existing_notes + "\n" + "\n".join(zep_facts)
+            rules_merged["_zep_facts_applied"] = len(zep_facts)
+    except Exception:
+        pass
+    # ─────────────────────────────────────────────────────────────────
+
+
     src_ctx = build_source_context(ctx, assess, override=source_context)
     ctx["source_context"] = src_ctx
     if target_destination == "overwrite":

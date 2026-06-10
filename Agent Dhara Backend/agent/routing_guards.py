@@ -63,10 +63,14 @@ _SOURCE_ALIASES: Dict[str, str] = {
     "blob":          "select source blob",
     "azure blob":    "select source blob",
     "azure":         "select source blob",
+    "blob data":     "select source blob",
+    "blob_data":     "select source blob",
     "database":      "select source database",
     "sql":           "select source database",
     "db":            "select source database",
     "azure sql":     "select source database",
+    "sql data":      "select source database",
+    "sql_data":      "select source database",
     "local":         "select source local",
     "filesystem":    "select source local",
     "local files":   "select source local",
@@ -75,6 +79,8 @@ _SOURCE_ALIASES: Dict[str, str] = {
     "csv":           "select source local",
     "excel":         "select source local",
     "parquet":       "select source local",
+    "local data":    "select source local",
+    "local_data":    "select source local",
     "s3":            "select source blob",
     "storage":       "select source blob",
     "adls":          "select source blob",
@@ -82,6 +88,14 @@ _SOURCE_ALIASES: Dict[str, str] = {
     "mysql":         "select source database",
     "mssql":         "select source database",
     "sqlite":        "select source database",
+    "file stream":   "select source local",
+    "file_stream":   "select source local",
+    "stream":        "select source local",
+    "streams":       "select source local",
+    "real-time streams": "select source local",
+    "real-time stream":  "select source local",
+    "apis":          "select source database",
+    "api":           "select source database",
 }
 
 
@@ -90,7 +104,7 @@ def normalize_source_message(msg: str, ctx: Dict[str, Any]) -> str:
     Expand bare source keywords to deterministic commands on fresh sessions.
     Only fires when no source has been selected yet.
     """
-    if ctx.get("selected_source"):
+    if ctx.get("selected_source") or ctx.get("selected_source_index") is not None:
         return msg  # source already set — never override
     stripped = (msg or "").strip().lower()
     return _SOURCE_ALIASES.get(stripped, msg)

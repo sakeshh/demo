@@ -58,7 +58,31 @@ def _connect() -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_experiences_session_ts ON experiences(session_id, ts DESC)")
+    
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pipeline_runs (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT    NOT NULL,
+            run_ts          REAL    NOT NULL,
+            dataset_names   TEXT,          -- JSON array: ["orders", "customers"]
+            schema_hash     TEXT,          -- SHA256 from _assessment_schema_signature()
+            dq_score        INTEGER,       -- 0-100 from etl_readiness_scorer
+            dq_issue_count  INTEGER,
+            etl_phase       TEXT,          -- last phase reached: planned/confirmed/generated/executed
+            etl_engine      TEXT,          -- python/sql/pyspark/adf
+            etl_outcome     TEXT,          -- succeeded/failed/skipped
+            generation_mode TEXT,
+            notes           TEXT,          -- free text for narrative
+            FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_session ON pipeline_runs(session_id, run_ts DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_datasets ON pipeline_runs(dataset_names)")
+    
     return conn
+
 
 
 # FIX (2026-05-07): New sessions now initialise last_step as
@@ -207,3 +231,159 @@ def list_recent_experiences(
 # Backward compatibility aliases
 log_experience = add_experience
 get_experiences = list_recent_experiences
+
+
+def save_pipeline_run(
+    session_id: str,
+    *,
+    dataset_names: List[str],
+    schema_hash: str,
+    dq_score: int,
+    dq_issue_count: int,
+    etl_phase: str = "",
+    etl_engine: str = "",
+    etl_outcome: str = "",
+    generation_mode: str = "",
+    notes: str = ""
+) -> int:
+    sid = (session_id or "default").strip() or "default"
+    now = time.time()
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO pipeline_runs (
+                session_id, run_ts, dataset_names, schema_hash, dq_score,
+                dq_issue_count, etl_phase, etl_engine, etl_outcome,
+                generation_mode, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                sid,
+                now,
+                json.dumps(dataset_names, cls=SessionJSONEncoder),
+                schema_hash,
+                dq_score,
+                dq_issue_count,
+                etl_phase,
+                etl_engine,
+                etl_outcome,
+                generation_mode,
+                notes
+            )
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def get_latest_pipeline_run(
+    session_id: str,
+    dataset_names: Optional[List[str]] = None
+) -> Optional[Dict[str, Any]]:
+    sid = (session_id or "default").strip() or "default"
+    conn = _connect()
+    try:
+        if dataset_names:
+            rows = conn.execute(
+                "SELECT id, session_id, run_ts, dataset_names, schema_hash, dq_score, "
+                "dq_issue_count, etl_phase, etl_engine, etl_outcome, generation_mode, notes "
+                "FROM pipeline_runs WHERE session_id = ? ORDER BY run_ts DESC",
+                (sid,)
+            ).fetchall()
+            
+            target_set = set(dataset_names)
+            for r in rows:
+                try:
+                    ds_list = json.loads(r[3] or "[]")
+                    if target_set.intersection(ds_list):
+                        return {
+                            "id": r[0],
+                            "session_id": r[1],
+                            "run_ts": r[2],
+                            "dataset_names": ds_list,
+                            "schema_hash": r[4],
+                            "dq_score": r[5],
+                            "dq_issue_count": r[6],
+                            "etl_phase": r[7],
+                            "etl_engine": r[8],
+                            "etl_outcome": r[9],
+                            "generation_mode": r[10],
+                            "notes": r[11],
+                        }
+                except Exception:
+                    pass
+            return None
+        else:
+            row = conn.execute(
+                "SELECT id, session_id, run_ts, dataset_names, schema_hash, dq_score, "
+                "dq_issue_count, etl_phase, etl_engine, etl_outcome, generation_mode, notes "
+                "FROM pipeline_runs WHERE session_id = ? ORDER BY run_ts DESC LIMIT 1",
+                (sid,)
+            ).fetchone()
+            if not row:
+                return None
+            try:
+                ds_list = json.loads(row[3] or "[]")
+            except Exception:
+                ds_list = []
+            return {
+                "id": row[0],
+                "session_id": row[1],
+                "run_ts": row[2],
+                "dataset_names": ds_list,
+                "schema_hash": row[4],
+                "dq_score": row[5],
+                "dq_issue_count": row[6],
+                "etl_phase": row[7],
+                "etl_engine": row[8],
+                "etl_outcome": row[9],
+                "generation_mode": row[10],
+                "notes": row[11],
+            }
+    finally:
+        conn.close()
+
+
+def get_pipeline_runs_for_datasets(
+    dataset_names: List[str],
+    limit: int = 10
+) -> List[Dict[str, Any]]:
+    conn = _connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, session_id, run_ts, dataset_names, schema_hash, dq_score, "
+            "dq_issue_count, etl_phase, etl_engine, etl_outcome, generation_mode, notes "
+            "FROM pipeline_runs ORDER BY run_ts DESC"
+        ).fetchall()
+        
+        out = []
+        target_set = set(dataset_names)
+        for r in rows:
+            try:
+                ds_list = json.loads(r[3] or "[]")
+                if target_set.intersection(ds_list):
+                    out.append({
+                        "id": r[0],
+                        "session_id": r[1],
+                        "run_ts": r[2],
+                        "dataset_names": ds_list,
+                        "schema_hash": r[4],
+                        "dq_score": r[5],
+                        "dq_issue_count": r[6],
+                        "etl_phase": r[7],
+                        "etl_engine": r[8],
+                        "etl_outcome": r[9],
+                        "generation_mode": r[10],
+                        "notes": r[11],
+                    })
+                    if len(out) >= limit:
+                        break
+            except Exception:
+                pass
+        return out
+    finally:
+        conn.close()
+
