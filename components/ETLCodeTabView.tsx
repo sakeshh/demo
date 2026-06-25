@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaLock, FaLockOpen, FaCopy, FaDownload, FaExclamationTriangle, FaCheckCircle, FaChevronRight } from 'react-icons/fa';
+import { FaLock, FaLockOpen, FaCopy, FaDownload, FaUpload, FaExclamationTriangle, FaCheckCircle, FaChevronRight, FaSpinner, FaCheck } from 'react-icons/fa';
 import { DQGateResult, ManualReviewItem } from '@/types/pipeline';
 import SQLQualityBadge from '@/components/SQLQualityBadge';
 import ManualReviewLane from '@/components/ManualReviewLane';
@@ -20,6 +20,14 @@ interface ETLCodeTabViewProps {
   onCopy: (text: string) => void;
   onDownload: (text: string, type: 'phase1' | 'phase2') => void;
   onForceUnlock?: () => void;
+
+  // Code editing & language switching extensions
+  onCodeChange?: (code: string, phase: 'phase1' | 'phase2') => void;
+  engine?: string;
+  sqlDialect?: 'tsql' | 'ansi';
+  onEngineChange?: (engine: any, dialect?: 'tsql' | 'ansi') => void;
+  saveStatus?: 'idle' | 'saving' | 'saved' | 'error';
+  isGenerating?: boolean;
 }
 
 export default function ETLCodeTabView({
@@ -35,9 +43,16 @@ export default function ETLCodeTabView({
   onCopy,
   onDownload,
   onForceUnlock,
+  onCodeChange,
+  engine = 'python',
+  sqlDialect = 'tsql',
+  onEngineChange,
+  saveStatus = 'idle',
+  isGenerating = false,
 }: ETLCodeTabViewProps) {
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied'>('idle');
   const isPhase2Locked = gateResult ? !gateResult.passed : false;
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleCopy = (text: string | null) => {
     if (!text) return;
@@ -46,12 +61,25 @@ export default function ETLCodeTabView({
     setTimeout(() => setCopyStatus('idle'), 2000);
   };
 
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      if (text && onCodeChange) {
+        onCodeChange(text, activeTab === 'phase1' ? 'phase1' : 'phase2');
+      }
+    };
+    reader.readAsText(file);
+  };
+
   const pendingReviewsCount = manualItems.filter(item => !item.default_resolution).length;
 
   return (
     <div className="rounded-2xl border border-black/10 bg-white/60 shadow-sm overflow-hidden flex flex-col min-h-[600px]">
       {/* Header Tabs */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-black/10 bg-black/[0.02] p-4 gap-4">
+      <div className="flex flex-col xl:flex-row xl:items-center justify-between border-b border-black/10 bg-black/[0.02] p-4 gap-4">
         <div className="flex bg-black/5 p-1 rounded-xl w-fit">
           <button
             type="button"
@@ -88,6 +116,8 @@ export default function ETLCodeTabView({
           </button>
         </div>
 
+
+
         {qualityScore && <SQLQualityBadge scoreData={qualityScore} />}
       </div>
 
@@ -105,7 +135,31 @@ export default function ETLCodeTabView({
             >
               <div className="flex items-center justify-between text-xs text-black/55 font-medium">
                 <span>Phase 1 active: Cleansing, normalization, and Sentinel nullifications</span>
-                <div className="flex gap-2">
+                <div className="flex items-center gap-3">
+                  {/* Save Status Indicator */}
+                  {saveStatus !== 'idle' && (
+                    <div className="flex items-center gap-1.5 text-xs text-black/45 font-medium select-none">
+                      {saveStatus === 'saving' && (
+                        <>
+                          <FaSpinner className="animate-spin text-[#0070AD]" />
+                          <span>Saving changes...</span>
+                        </>
+                      )}
+                      {saveStatus === 'saved' && (
+                        <>
+                          <FaCheck className="text-emerald-500" />
+                          <span className="text-emerald-600">Saved to session</span>
+                        </>
+                      )}
+                      {saveStatus === 'error' && (
+                        <>
+                          <FaExclamationTriangle className="text-rose-500" />
+                          <span className="text-rose-600">Failed to save</span>
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => handleCopy(phase1Code)}
@@ -122,13 +176,42 @@ export default function ETLCodeTabView({
                     <FaDownload />
                     <span>Download</span>
                   </button>
+                  {onCodeChange && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#0070AD]/20 bg-[#0070AD]/5 hover:bg-[#0070AD]/10 text-[#0070AD] font-semibold transition-colors"
+                      >
+                        <FaUpload />
+                        <span>Upload</span>
+                      </button>
+                      <input
+                        type="file"
+                        ref={fileInputRef}
+                        onChange={handleFileUpload}
+                        accept=".sql,.py,.json,.txt"
+                        className="hidden"
+                      />
+                    </>
+                  )}
                 </div>
               </div>
-              <textarea
-                readOnly
-                value={phase1Code || 'No Phase 1 code generated.'}
-                className="w-full flex-1 min-h-[400px] rounded-xl border border-black/10 bg-zinc-950 p-4 font-mono text-[11px] leading-relaxed text-emerald-100 placeholder:text-emerald-100/35 outline-none resize-none"
-              />
+              <div className="relative flex-1 min-h-[400px] flex flex-col">
+                <textarea
+                  value={phase1Code || ''}
+                  onChange={(e) => onCodeChange?.(e.target.value, 'phase1')}
+                  placeholder={onCodeChange ? "Type, paste, or upload your own Phase 1 code here..." : "No Phase 1 code generated."}
+                  className="w-full flex-1 rounded-xl border border-black/10 bg-zinc-950 p-4 font-mono text-[11px] leading-relaxed text-emerald-100 placeholder:text-emerald-100/35 outline-none resize-none"
+                  disabled={isGenerating}
+                />
+                {isGenerating && (
+                  <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px] rounded-xl flex flex-col items-center justify-center text-white space-y-3 select-none">
+                    <FaSpinner className="animate-spin text-3xl text-[#0070AD]" />
+                    <span className="text-xs font-bold tracking-wider uppercase text-zinc-300">Regenerating ETL Code...</span>
+                  </div>
+                )}
+              </div>
             </motion.div>
           )}
 
@@ -189,7 +272,31 @@ export default function ETLCodeTabView({
                 <div className="flex-1 flex flex-col space-y-4">
                   <div className="flex items-center justify-between text-xs text-black/55 font-medium">
                     <span>Phase 2 active: Advanced joins, business logic validation, and SCD models</span>
-                    <div className="flex gap-2">
+                    <div className="flex items-center gap-3">
+                      {/* Save Status Indicator */}
+                      {saveStatus !== 'idle' && (
+                        <div className="flex items-center gap-1.5 text-xs text-black/45 font-medium select-none">
+                          {saveStatus === 'saving' && (
+                            <>
+                              <FaSpinner className="animate-spin text-[#0070AD]" />
+                              <span>Saving changes...</span>
+                            </>
+                          )}
+                          {saveStatus === 'saved' && (
+                            <>
+                              <FaCheck className="text-emerald-500" />
+                              <span className="text-emerald-600">Saved to session</span>
+                            </>
+                          )}
+                          {saveStatus === 'error' && (
+                            <>
+                              <FaExclamationTriangle className="text-rose-500" />
+                              <span className="text-rose-600">Failed to save</span>
+                            </>
+                          )}
+                        </div>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => handleCopy(phase2Code)}
@@ -206,13 +313,42 @@ export default function ETLCodeTabView({
                         <FaDownload />
                         <span>Download</span>
                       </button>
+                      {onCodeChange && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#0070AD]/20 bg-[#0070AD]/5 hover:bg-[#0070AD]/10 text-[#0070AD] font-semibold transition-colors"
+                          >
+                            <FaUpload />
+                            <span>Upload</span>
+                          </button>
+                          <input
+                            type="file"
+                            ref={fileInputRef}
+                            onChange={handleFileUpload}
+                            accept=".sql,.py,.json,.txt"
+                            className="hidden"
+                          />
+                        </>
+                      )}
                     </div>
                   </div>
-                  <textarea
-                    readOnly
-                    value={phase2Code || 'No Phase 2 code generated.'}
-                    className="w-full flex-1 min-h-[400px] rounded-xl border border-black/10 bg-zinc-950 p-4 font-mono text-[11px] leading-relaxed text-emerald-100 placeholder:text-emerald-100/35 outline-none resize-none"
-                  />
+                  <div className="relative flex-1 min-h-[400px] flex flex-col">
+                    <textarea
+                      value={phase2Code || ''}
+                      onChange={(e) => onCodeChange?.(e.target.value, 'phase2')}
+                      placeholder={onCodeChange ? "Type, paste, or upload your own Phase 2 code here..." : "No Phase 2 code generated."}
+                      className="w-full flex-1 rounded-xl border border-black/10 bg-zinc-950 p-4 font-mono text-[11px] leading-relaxed text-emerald-100 placeholder:text-emerald-100/35 outline-none resize-none"
+                      disabled={isGenerating}
+                    />
+                    {isGenerating && (
+                      <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px] rounded-xl flex flex-col items-center justify-center text-white space-y-3 select-none">
+                        <FaSpinner className="animate-spin text-3xl text-[#0070AD]" />
+                        <span className="text-xs font-bold tracking-wider uppercase text-zinc-300">Regenerating ETL Code...</span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </motion.div>

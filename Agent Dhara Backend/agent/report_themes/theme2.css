@@ -237,6 +237,18 @@ section > h2 {
 #datasets h2 {
   background: linear-gradient(135deg, #3730a3 0%, #4f46e5 40%, #6366f1 100%);
 }
+#governance h2,
+#llm-recs h2 {
+  color: black !important;
+  background: none !important;
+  text-shadow: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  font-size: 1.25rem !important;
+  text-transform: none !important;
+  letter-spacing: normal !important;
+  margin: 20px 0 12px !important;
+}
 .section-lead {
   color: var(--ink-secondary);
   font-size: 0.9375rem;

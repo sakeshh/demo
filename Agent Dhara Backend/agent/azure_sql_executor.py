@@ -299,16 +299,34 @@ def run_transactional_sql(
 
     try:
         conn = get_connection(connection_string)
-        cursor = conn.cursor()
-
+        
+        # Regex to detect DDL statements that require autocommit
+        ddl_pattern = re.compile(r"^\s*(CREATE|ALTER|DROP|TRUNCATE)\b", re.IGNORECASE | re.MULTILINE)
+        
+        _has_open_dml_txn = False  # track if DML transaction needs committing
         for batch_sql in batches:
+            # Check if this specific batch is DDL
+            is_ddl = bool(ddl_pattern.search(batch_sql))
+            
+            # Switch autocommit based on DDL/DML context
+            if is_ddl and not conn.autocommit:
+                # Commit any pending DML transaction before running DDL
+                if _has_open_dml_txn:
+                    conn.commit()
+                    _has_open_dml_txn = False
+                conn.autocommit = True
+            elif not is_ddl and conn.autocommit:
+                conn.autocommit = False
+
+            cursor = conn.cursor()
             batch_res = execute_sql_batch(cursor, batch_sql, timeout_s=timeout_s)
             batch_results.append(batch_res)
             total_duration += batch_res["duration_ms"]
 
             if batch_res["error"] is not None:
-                # Rollback on failure
-                conn.rollback()
+                # Rollback on failure (only if not in autocommit mode)
+                if not conn.autocommit:
+                    conn.rollback()
                 return {
                     "ok": False,
                     "run_id": rid,
@@ -328,16 +346,20 @@ def run_transactional_sql(
             affected = batch_res["rows_affected"]
             if affected > 0:
                 total_rows_affected += affected
+            if not is_ddl:
+                _has_open_dml_txn = True
 
-        # Commit on success
-        conn.commit()
+        # Commit on success (only if not in autocommit mode)
+        if not conn.autocommit:
+            conn.commit()
+            
         return {
             "ok": True,
             "run_id": rid,
             "dry_run": False,
             "requires_approval": app_check["requires_approval"],
             "ops_found": app_check["ops_found"],
-            "transaction_committed": True,
+            "transaction_committed": True,  # All batches succeeded
             "rollback_reason": None,
             "batches_run": len(batches),
             "total_rows_affected": total_rows_affected,
@@ -348,7 +370,7 @@ def run_transactional_sql(
         }
 
     except Exception as e:
-        if conn is not None:
+        if conn is not None and not conn.autocommit:
             try:
                 conn.rollback()
             except Exception:

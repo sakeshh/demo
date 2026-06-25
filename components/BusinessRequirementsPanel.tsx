@@ -170,6 +170,45 @@ export default function BusinessRequirementsPanel({
     }
   };
 
+  const handleSkip = async () => {
+    setSaving(true);
+    setError(null);
+    const defaultRules: BusinessRules = {
+      never_drop_rows: false,
+      dq_threshold: 70,
+      outlier_strategy: 'none',
+      required_columns: [],
+      non_nullable: [],
+      exclude_columns: [],
+      valid_values: {},
+      custom_assertions: [],
+      notes: '',
+    };
+    try {
+      const res = await fetch('/api/session-context', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId,
+          context: {
+            pending_business_rules: defaultRules,
+          },
+        }),
+      });
+
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.message || 'Failed to save empty rules to session context.');
+      }
+
+      onComplete();
+    } catch (err: any) {
+      setError(err?.message || 'Failed to skip requirements. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   // Rule editing functions
   const toggleNeverDrop = () => {
     if (!rules) return;
@@ -403,17 +442,39 @@ export default function BusinessRequirementsPanel({
               </>
             )}
           </motion.button>
+
+          <div className="text-center pt-2">
+            <button
+              type="button"
+              onClick={handleSkip}
+              disabled={saving}
+              className="text-xs text-black/45 hover:text-[#0070AD] hover:underline font-bold transition-all disabled:opacity-50"
+            >
+              Skip this step & proceed without rules
+            </button>
+          </div>
         </div>
 
         {/* Right Column: Rule Verification & Customization */}
         <div className="space-y-6">
           {!rules ? (
-            <div className="border border-dashed border-black/10 rounded-2xl p-12 text-center text-black/45 bg-white/30 backdrop-blur-xl h-[420px] flex flex-col items-center justify-center space-y-3">
+            <div className="border border-dashed border-black/10 rounded-2xl p-12 text-center text-black/45 bg-white/30 backdrop-blur-xl h-[420px] flex flex-col items-center justify-center space-y-4">
               <FaClipboardList className="text-4xl text-black/25" />
               <h3 className="font-bold text-zinc-700">No Rules Extracted</h3>
               <p className="text-xs max-w-xs leading-relaxed">
                 Provide business requirements on the left, then click <strong>Extract Rules</strong> to view, modify, and confirm constraints.
               </p>
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={handleSkip}
+                  disabled={saving}
+                  className="px-5 py-2.5 text-xs font-bold rounded-xl border border-black/10 bg-white/80 hover:bg-black/[0.02] hover:border-[#0070AD]/30 text-zinc-700 transition-all flex items-center gap-2 justify-center mx-auto shadow-sm disabled:opacity-50"
+                >
+                  {saving && <FaSpinner className="animate-spin text-[#0070AD]" />}
+                  Skip & Proceed without Rules
+                </button>
+              </div>
             </div>
           ) : (
             <div className="space-y-6 bg-white/70 backdrop-blur-xl p-6 rounded-2xl border border-black/10 shadow-[0_8px_32px_rgba(0,0,0,0.03)] max-h-[70vh] overflow-y-auto options-scroll">

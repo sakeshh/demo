@@ -74,9 +74,13 @@ def get_fabric_storage_options() -> Dict[str, str]:
     logger.info("Service Principal credentials not fully configured. Attempting token-based authentication via DefaultAzureCredential...")
     try:
         from azure.identity import DefaultAzureCredential
-        cred = DefaultAzureCredential()
-        # Request a token for Azure Storage scope (scope expected by OneLake)
-        token_response = cred.get_token("https://storage.azure.com/.default")
+        if tenant_id:
+            os.environ["AZURE_TENANT_ID"] = tenant_id
+            cred = DefaultAzureCredential()
+            token_response = cred.get_token("https://storage.azure.com/.default", tenant_id=tenant_id)
+        else:
+            cred = DefaultAzureCredential()
+            token_response = cred.get_token("https://storage.azure.com/.default")
         options["bearer_token"] = token_response.token
         logger.info("Successfully acquired storage access token via DefaultAzureCredential.")
     except Exception as e:

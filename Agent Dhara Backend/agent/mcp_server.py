@@ -147,6 +147,12 @@ class EtlDeployPayload(BaseModel):
     session_id: str = "default"
 
 
+class EtlUpdateCodePayload(BaseModel):
+    session_id: str
+    code: str
+    phase: str
+
+
 class EtlExecutePayload(BaseModel):
     session_id: str
     approved: Optional[bool] = False
@@ -231,6 +237,20 @@ def healthz_db_env() -> Dict[str, Any]:
         "AZURE_SQL_SERVER": os.getenv("AZURE_SQL_SERVER"),
         "AZURE_SQL_DATABASE": os.getenv("AZURE_SQL_DATABASE"),
         "DHARA_AZURE_SQL_CONN_STR": os.getenv("DHARA_AZURE_SQL_CONN_STR") is not None,
+    }
+
+
+@app.get("/healthz/fabric-env", tags=["health"])
+def healthz_fabric_env() -> Dict[str, Any]:
+    from connectors.fabric_lakehouse_connector import is_fabric_mirror_enabled
+    import os
+    return {
+        "DHARA_FABRIC_MIRROR_ENABLED": os.getenv("DHARA_FABRIC_MIRROR_ENABLED"),
+        "is_fabric_mirror_enabled": is_fabric_mirror_enabled(),
+        "FABRIC_WORKSPACE_ID": os.getenv("FABRIC_WORKSPACE_ID"),
+        "FABRIC_LAKEHOUSE_NAME": os.getenv("FABRIC_LAKEHOUSE_NAME"),
+        "FABRIC_TENANT_ID": os.getenv("FABRIC_TENANT_ID"),
+        "has_client_secret": bool(os.getenv("FABRIC_CLIENT_SECRET")),
     }
 
 
@@ -1023,6 +1043,57 @@ def api_etl_execute(payload: EtlExecutePayload) -> Dict[str, Any]:
         timeout_s=payload.timeout_s or 120,
     )
     return res
+
+
+@app.post("/etl/update-code")
+def api_etl_update_code(payload: EtlUpdateCodePayload) -> Dict[str, Any]:
+    from agent.session_store import load_session, save_session
+    sid = (payload.session_id or "default").strip() or "default"
+    sess = load_session(sid)
+    ctx = sess.setdefault("context", {})
+    flow = ctx.setdefault("etl_flow", {})
+
+    eng = (flow.get("target_engine") or "sql").lower()
+
+    # Save code to specific phase
+    phase = str(payload.phase).strip().lower()
+    if phase == "phase1":
+        flow["code_cleanse"] = payload.code
+    elif phase == "phase2":
+        flow["code_transform"] = payload.code
+
+    # Recombine
+    cleanse_code = flow.get("code_cleanse") or ""
+    transform_code = flow.get("code_transform") or ""
+
+    if eng in ("sql", "tsql", "ansi"):
+        if cleanse_code and transform_code:
+            combined = cleanse_code + "\nGO\n\n" + transform_code
+        else:
+            combined = cleanse_code or transform_code
+    else:
+        if cleanse_code and transform_code:
+            combined = cleanse_code + "\n\n# ============================================================\n# Phase 2: Transform\n# ============================================================\n\n" + transform_code
+        else:
+            combined = cleanse_code or transform_code
+
+    flow["code"] = combined
+
+    # Write to physical file if it exists
+    rel_path = flow.get("artifact_rel_path")
+    if rel_path:
+        try:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            abs_path = os.path.join(root, rel_path)
+            if os.path.exists(abs_path):
+                with open(abs_path, "w", encoding="utf-8") as f:
+                    f.write(combined)
+        except Exception as e:
+            import logging
+            logging.getLogger("mcp_server").warning(f"Failed to write updated code to file: {e}")
+
+    save_session(sess)
+    return {"ok": True, "session_id": sid, "message": "Code updated successfully"}
 
 
 @app.post("/etl/run-full")

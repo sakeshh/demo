@@ -101,10 +101,10 @@ export default function SemanticColumnEditor({
           <select
             value={semType}
             onChange={(e) => setSemType(e.target.value)}
-            className="w-full px-2 py-1.5 border border-black/10 roundedbg-white outline-none focus:border-[#0070AD]/40"
+            className="w-full px-2 py-1.5 border border-black/10 rounded bg-white text-black outline-none focus:border-[#0070AD]/40"
           >
             {SEMANTIC_TYPES.map((opt) => (
-              <option key={opt.value} value={opt.value}>
+              <option key={opt.value} value={opt.value} className="text-black bg-white">
                 {opt.label}
               </option>
             ))}
@@ -119,10 +119,10 @@ export default function SemanticColumnEditor({
           <select
             value={subType}
             onChange={(e) => setSubType(e.target.value)}
-            className="w-full px-2 py-1.5 border border-black/10 rounded bg-white outline-none focus:border-[#0070AD]/40"
+            className="w-full px-2 py-1.5 border border-black/10 rounded bg-white text-black outline-none focus:border-[#0070AD]/40"
           >
             {SUB_TYPES.map((opt) => (
-              <option key={opt.value} value={opt.value}>
+              <option key={opt.value} value={opt.value} className="text-black bg-white">
                 {opt.label}
               </option>
             ))}
@@ -137,10 +137,10 @@ export default function SemanticColumnEditor({
           <select
             value={piiLevel}
             onChange={(e) => setPiiLevel(e.target.value as any)}
-            className="w-full px-2 py-1.5 border border-black/10 rounded bg-white outline-none focus:border-[#0070AD]/40"
+            className="w-full px-2 py-1.5 border border-black/10 rounded bg-white text-black outline-none focus:border-[#0070AD]/40"
           >
             {PII_LEVELS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
+              <option key={opt.value} value={opt.value} className="text-black bg-white">
                 {opt.label}
               </option>
             ))}

@@ -1,6 +1,10 @@
 {
-    "dbo.AssetZones": {
-        "AssetID": "int64",
-        "ZoneID": "int64"
+    "dbo.Customers_Raw": {
+        "CustomerID": "int64",
+        "CustomerName": "object",
+        "Email": "object",
+        "Phone": "object",
+        "City": "object",
+        "CreatedDate": "object"
     }
 }

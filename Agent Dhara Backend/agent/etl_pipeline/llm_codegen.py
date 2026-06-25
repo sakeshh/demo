@@ -101,7 +101,12 @@ T-SQL REQUIREMENTS:
   Inside each table-cleaning stored procedure, initialize a temporary staging table (e.g. `#Orders_Staging`) by doing `SELECT * INTO #Orders_Staging FROM dbo.Orders_Clean WHERE 1=0;`. Copy the raw data (utilizing candidate key CTE deduplication and watermarking filters) into the staging table (populating `@run_id` to `etl_batch_id`). Execute all transformations, updates, and validations directly on the staging table `#Orders_Staging`. Finally, truncate/delete records in the target clean table `dbo.Orders_Clean` and insert the fully transformed records from the staging table into `dbo.Orders_Clean`.
 - Modular Stored Procedures: Wrap all cleaning steps for each table into dedicated stored procedures named `dbo.etl_clean_<table_base_name>`.
 - Master Orchestration: Generate a master coordinator procedure named `dbo.etl_main` that calls all the individual table cleaning stored procedures.
-- Execution Logging & Log ID Bugfix: Output DDL to create a logging table named `dbo.etl_log` with columns `id INT IDENTITY(1,1) PRIMARY KEY`, `process_name VARCHAR(100) NOT NULL`, `start_time DATETIME NOT NULL`, `end_time DATETIME NULL`, `status VARCHAR(20) NOT NULL`, `error_message VARCHAR(MAX) NULL`. 
+- Idempotent T-SQL DDL (CRITICAL): NEVER use `CREATE TABLE IF NOT EXISTS` — that is MySQL/PostgreSQL syntax and is INVALID in T-SQL/SQL Server. For every infrastructure table (etl_log, etl_rejects, etl_watermark, clean tables, indexes, procedures), you MUST use the correct T-SQL idempotent guard pattern:
+  - Tables: `IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'TableName' AND schema_id = SCHEMA_ID('dbo')) CREATE TABLE dbo.TableName (...);`
+  - Indexes: `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IndexName' AND object_id = OBJECT_ID('dbo.TableName')) CREATE NONCLUSTERED INDEX IndexName ON dbo.TableName (...);`
+  - Procedures: `IF OBJECT_ID('dbo.ProcName', 'P') IS NOT NULL DROP PROCEDURE dbo.ProcName; GO` followed by `CREATE PROCEDURE dbo.ProcName AS BEGIN ... END; GO`
+  Each DDL statement MUST be followed by a `GO` batch separator on its own line.
+- Execution Logging & Log ID Bugfix: Output DDL to create a logging table named `dbo.etl_log` with columns `id INT IDENTITY(1,1) PRIMARY KEY`, `process_name VARCHAR(100) NOT NULL`, `start_time DATETIME NOT NULL`, `end_time DATETIME NULL`, `status VARCHAR(20) NOT NULL`, `error_message VARCHAR(MAX) NULL` using the T-SQL idempotent guard described above. 
   Inside each stored procedure's TRY block, you MUST first run the `INSERT INTO dbo.etl_log (process_name, start_time, status) VALUES ('...', GETDATE(), 'RUNNING');` statement. IMMEDIATELY AFTER this insert, define and set the batch run ID: `DECLARE @run_id INT = SCOPE_IDENTITY();`. NEVER declare `@run_id = SCOPE_IDENTITY();` before any insert statement has occurred in the procedure, as this returns NULL and breaks audit batch tracking. Wrap the block in a transaction. Commit on success and rollback on failure.
 - Balanced Transactions: Every Try-Catch block MUST wrap data modifications in an explicit transaction block. Begin the transaction inside `BEGIN TRY` using `BEGIN TRANSACTION;` immediately after defining `@run_id`. Commit the transaction using `COMMIT TRANSACTION;` at the very end of the `BEGIN TRY` block (after all updates and logging are completed). At the beginning of the `BEGIN CATCH` block, you MUST verify if a transaction is still active and roll it back using: `IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;`. Never omit `BEGIN TRANSACTION` if `COMMIT/ROLLBACK` are used, or vice versa, to ensure compilation succeeds.
 - Incremental Loading, Watermarking & Watermark Storage: Stored procedures and the main procedure must accept parameters `@load_type VARCHAR(20) = 'FULL'` and `@last_run DATETIME = NULL`. Generate DDL for `dbo.etl_watermark (process_name VARCHAR(100) PRIMARY KEY, last_run_time DATETIME NOT NULL)`. 
@@ -114,8 +119,9 @@ T-SQL REQUIREMENTS:
   2. Merge all default value fillings and invalid/sentinel replacements into a **single join-based `UPDATE` statement** joining `dbo.etl_default_values` and `dbo.etl_invalid_values` via `LEFT JOIN`s.
 - Zero Redundant Operations: Do not output duplicate or redundant CTE statements, updates, or procedure calls. Verify that any deduplication logic, outlier checks, or date/email validation is written once per column.
 - Type-Safe String Transformations: If applying `LTRIM`, `RTRIM`, `LOWER`, or `UPPER` on a non-string column (such as numeric/date columns), first cast the column explicitly to a string type (e.g. `CAST(col AS NVARCHAR(MAX))`) before calling the string function, then cast back to the target type. (e.g. `TRY_CAST(NULLIF(LTRIM(RTRIM(CAST(credits AS NVARCHAR(50)))), '') AS INT)`).
-- Rejects & Quarantine Logging: Enforce the use of `dbo.etl_rejects` table. Generate DDL to create the rejects logging table `dbo.etl_rejects` if it does not exist:
+- Rejects & Quarantine Logging: Enforce the use of `dbo.etl_rejects` table. Generate DDL to create the rejects logging table `dbo.etl_rejects` using the T-SQL idempotent guard (NEVER `CREATE TABLE IF NOT EXISTS`):
   ```sql
+  IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'etl_rejects' AND schema_id = SCHEMA_ID('dbo'))
   CREATE TABLE dbo.etl_rejects (
       id INT IDENTITY(1,1) PRIMARY KEY,
       table_name VARCHAR(100) NOT NULL,
@@ -124,6 +130,7 @@ T-SQL REQUIREMENTS:
       etl_batch_id INT NOT NULL,
       rejected_at DATETIME DEFAULT GETDATE()
   );
+  GO
   ```
   For any row that fails validation format constraints (e.g. invalid date formats, invalid email patterns) or referential integrity (joins), you MUST insert the violating records into `dbo.etl_rejects` and delete them from the staging table prior to any transformation/cast steps. Use `(SELECT * FROM staging_alias r2 WHERE r2.[pk] = r.[pk] FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)` to serialize the violating row data. Perform validation deletes before applying transformations/casts to preserve the original invalid values.
 - Default Value Sanity & No Fake/Placeholder Defaults: Seed defaults/invalid values dynamically. Use `NULL` as the default value strategy for date, email, and phone/identifier columns to prevent downstream data pollution. NEVER hardcode placeholder default values (like `'10120631.5'` for dates, or `'99999'` for Phone/IDs) when filling nulls; un-defaulted values must remain `NULL`. Replace literal default values with lookup queries using `TRY_CAST(default_value AS <type>)` from `dbo.etl_default_values` (dynamic casting based on column data type).
@@ -140,6 +147,7 @@ T-SQL REQUIREMENTS:
 - Duplicates Deduplication ordering: Never use non-existent columns (like `etl_created_at`) in `ROW_NUMBER() OVER (PARTITION BY LOWER(LTRIM(RTRIM(CAST([pk] AS NVARCHAR(400))))) ORDER BY ...)` inside the staging copy CTE. Use a business column (like `CreatedDate DESC` or `OrderDate DESC`) for ordering.
 - No SELECT DISTINCT * for deduplication: Avoid using expensive, non-key-aware `SELECT DISTINCT` statements. Deduplication must be key-aware using CTE `ROW_NUMBER()`.
 - Idempotent and Production-Safe views/joins: Ensure join views use `CREATE VIEW` instead of `SELECT ... INTO` to prevent duplicate view compilation failures or schema write conflicts.
+- FORBIDDEN MySQL/PostgreSQL Syntax: NEVER output `CREATE TABLE IF NOT EXISTS`, `CREATE OR REPLACE`, `ON CONFLICT`, `RETURNING`, `ILIKE`, `SERIAL`, `AUTO_INCREMENT`, or any other non-T-SQL syntax. These are invalid in SQL Server and will cause the entire batch to fail with a hard rollback. T-SQL equivalents MUST be used at all times.
 """,
     "sql-ansi": f"""You are a senior data engineer writing portable ANSI SQL ETL scripts.
 

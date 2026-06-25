@@ -56,6 +56,7 @@ type BackendAssessment = {
           high_severity?: number;
           medium_severity?: number;
           low_severity?: number;
+          dq_score_0_100?: number;
         };
         issues?: Array<{
           severity?: Severity | string;
@@ -81,6 +82,7 @@ type UiDatasetSummary = {
   high: number;
   med: number;
   low: number;
+  dqScore?: number;
 };
 
 function normalizeSeverity(s: any): Severity {
@@ -126,6 +128,7 @@ export default function DataAssessmentReport({
         high: Number(summ?.high_severity ?? 0) || 0,
         med: Number(summ?.medium_severity ?? 0) || 0,
         low: Number(summ?.low_severity ?? 0) || 0,
+        dqScore: summ?.dq_score_0_100 !== undefined ? Number(summ.dq_score_0_100) : undefined,
       };
     });
   }, [assessment]);
@@ -525,7 +528,7 @@ export default function DataAssessmentReport({
                 <tbody className="divide-y divide-black/5">
                   {summaries.map((r) => {
                     const totalIssues = r.high + r.med + r.low;
-                    const score = Math.max(0, 100 - (r.high * 5 + r.med * 2 + r.low * 0.5) / (r.cols || 1));
+                    const score = r.dqScore !== undefined ? r.dqScore : Math.max(0, 100 - (r.high * 5 + r.med * 2 + r.low * 0.5) / (r.cols || 1));
                     return (
                       <tr key={r.name} className="transition-colors hover:bg-[#12ABDB]/5 group/row">
                         <td className="py-3.5 px-4 font-black text-zinc-900">{r.name}</td>

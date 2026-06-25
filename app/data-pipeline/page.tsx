@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FaDatabase, FaFileAlt, FaChartBar, FaCode, FaCheck, FaArrowLeft, FaDownload, FaEye, FaArrowRight, FaClipboardList, FaTags, FaExclamationTriangle } from 'react-icons/fa';
+import { FaDatabase, FaFileAlt, FaChartBar, FaCode, FaCheck, FaArrowLeft, FaDownload, FaEye, FaArrowRight, FaClipboardList, FaTags, FaExclamationTriangle, FaCheckCircle, FaCloudUploadAlt } from 'react-icons/fa';
 import { useRouter } from 'next/navigation';
 import AnimatedBackground from '@/components/AnimatedBackground';
 import DatabaseSelector from '@/components/DatabaseSelector';
@@ -33,6 +33,7 @@ interface ExecutionResult {
     rollback_reason: string | null;
   };
   timestamp_utc: string;
+  fabric_mirror_result?: any;
 }
 
 type Step = 'database' | 'files' | 'business-requirements' | 'assessment' | 'report' | 'semantics' | 'requirements' | 'etl' | 'cleaning' | 'complete';
@@ -182,8 +183,13 @@ export default function DataPipelinePage() {
       }
       const outlierScore = Math.max(0.0, 100.0 - outliersCount * 10.0);
 
-      // Weighted DQ Score
-      const dqScore = 0.30 * nullScore + 0.30 * typeScore + 0.20 * dupScore + 0.20 * outlierScore;
+      // Estimated client-side weighted DQ Score
+      const estimatedDqScore = 0.30 * nullScore + 0.30 * typeScore + 0.20 * dupScore + 0.20 * outlierScore;
+
+      // Prefer backend-calculated score, fall back to estimated if not present
+      const dqDsBlock = (resultData.data_quality_issues || {}).datasets?.[dsName] || {};
+      const dsSummary = dqDsBlock.summary || {};
+      const dqScore = dsSummary.dq_score_0_100 !== undefined ? Number(dsSummary.dq_score_0_100) : estimatedDqScore;
 
       // Check high PII
       let hasHighPii = false;
@@ -867,6 +873,64 @@ export default function DataPipelinePage() {
                             {execResult.post_execution_summary?.rollback_reason && (
                               <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-950 text-xs">
                                 <strong>Rollback Reason:</strong> {execResult.post_execution_summary.rollback_reason}
+                              </div>
+                            )}
+
+                            {/* Fabric Mirroring Status */}
+                            {execResult.fabric_mirror_result && (
+                              <div className="p-4 rounded-xl border border-black/10 bg-white/70 space-y-3">
+                                <h6 className="text-xs font-black uppercase tracking-wider text-zinc-900 flex items-center gap-2">
+                                  <FaCloudUploadAlt className="text-[#0070AD]" />
+                                  Microsoft Fabric Lakehouse OneLake Mirror
+                                </h6>
+                                {execResult.fabric_mirror_result.ok ? (
+                                  <div className="flex items-center gap-2 text-xs font-semibold text-emerald-700">
+                                    <FaCheckCircle className="text-emerald-500" />
+                                    <span>Cleaned data was successfully uploaded and mirrored to Fabric OneLake!</span>
+                                  </div>
+                                ) : (
+                                  <div className="space-y-1.5">
+                                    <div className="flex items-center gap-2 text-xs font-semibold text-rose-700">
+                                      <FaExclamationTriangle className="text-rose-500 text-xs" />
+                                      <span>Fabric OneLake Mirroring failed or was skipped.</span>
+                                    </div>
+                                    {execResult.fabric_mirror_result.message && (
+                                      <p className="text-[11px] text-rose-600/90 bg-rose-50/50 p-2 rounded-lg font-mono">
+                                        {execResult.fabric_mirror_result.message}
+                                      </p>
+                                    )}
+                                  </div>
+                                )}
+                                
+                                {Array.isArray(execResult.fabric_mirror_result.details) && (
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+                                    {execResult.fabric_mirror_result.details.map((detail: any, idx: number) => (
+                                      <div key={idx} className={`flex flex-col gap-1 text-xs p-2.5 rounded-lg border ${detail.ok ? 'bg-black/[0.02] border-black/5' : 'bg-rose-50/60 border-rose-200/50'}`}>
+                                        <div className="flex items-center justify-between">
+                                          <span className="font-semibold text-zinc-700 font-mono truncate mr-2">{detail.table || detail.source || 'Unknown Table'}</span>
+                                          {detail.ok ? (
+                                            <span className="text-emerald-600 font-bold shrink-0 flex items-center gap-1">
+                                              ✓ Ready ({detail.rows ?? 0} rows)
+                                            </span>
+                                          ) : (
+                                            <span className="text-rose-600 font-bold shrink-0">
+                                              ⚠️ Failed ({detail.error || 'Unknown Error'})
+                                            </span>
+                                          )}
+                                        </div>
+                                        {!detail.ok && detail.message && (
+                                          <p className="text-[10px] text-rose-600/80 font-mono break-all leading-relaxed mt-0.5">{detail.message}</p>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {!execResult.fabric_mirror_result && !execResult.dry_run && (
+                              <div className="p-4 rounded-xl border border-dashed border-black/10 bg-black/[0.01] text-xs text-black/50 select-none">
+                                Microsoft Fabric mirroring is disabled or not configured in environment.
                               </div>
                             )}
 

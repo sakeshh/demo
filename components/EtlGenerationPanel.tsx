@@ -222,6 +222,61 @@ export default function EtlGenerationPanel({
   const [useAiCodegen, setUseAiCodegen] = useState(false);
   const [generateStatus, setGenerateStatus] = useState<string | null>(null);
 
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const debounceRef = useRef<NodeJS.Timeout | null>(null);
+
+  const saveCodeToBackend = async (code: string, phase: 'phase1' | 'phase2') => {
+    setSaveStatus('saving');
+    try {
+      const res = await fetch('/api/etl/update-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId,
+          code,
+          phase,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.message || 'Failed to save code');
+      }
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 2000);
+    } catch (e: any) {
+      console.error(e);
+      setSaveStatus('error');
+      setErr(e.message || 'Failed to save code to backend.');
+    }
+  };
+
+  const handleCodeChange = (newCode: string, phase: 'phase1' | 'phase2') => {
+    if (phase === 'phase1') {
+      setPhase1Code(newCode);
+      onCodeGenerated?.(newCode);
+    } else {
+      setPhase2Code(newCode);
+    }
+
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+    debounceRef.current = setTimeout(() => {
+      saveCodeToBackend(newCode, phase);
+    }, 800);
+  };
+
+  const handleEngineChange = async (newEngine: EtlEngine, dialect?: 'tsql' | 'ansi') => {
+    setEngineUserOverride(true);
+    setEngine(newEngine);
+    let activeDialect = sqlDialect;
+    if (dialect) {
+      setSqlDialect(dialect);
+      activeDialect = dialect;
+    }
+    await runGenerate(newEngine, activeDialect);
+  };
+
   useEffect(() => {
     if (plan) {
       setPlanJson(JSON.stringify(plan, null, 2));
@@ -629,9 +684,11 @@ export default function EtlGenerationPanel({
     }
   };
 
-  const runGenerate = async () => {
+  const runGenerate = async (overrideEngine?: EtlEngine, overrideDialect?: 'tsql' | 'ansi') => {
     setBusy(true);
     setErr(null);
+    const activeEngine = overrideEngine || engine;
+    const activeDialect = overrideDialect || sqlDialect;
     const codegenMode = useAiCodegen ? 'llm_then_template' : 'template';
     setGenerateStatus(
       useAiCodegen
@@ -640,13 +697,13 @@ export default function EtlGenerationPanel({
     );
     try {
       const eng =
-        engine === 'spark'
+        activeEngine === 'spark'
           ? 'pyspark'
-          : engine === 'sql'
-            ? sqlDialect === 'ansi'
+          : activeEngine === 'sql'
+            ? activeDialect === 'ansi'
               ? 'ansi'
               : 'sql'
-            : engine;
+            : activeEngine;
 
       const isLocked = gateResult ? !gateResult.passed : false;
       const isPhase2Disabled = isLocked && !forceUnlock;
@@ -658,7 +715,7 @@ export default function EtlGenerationPanel({
         body: JSON.stringify({
           session_id: sessionId,
           engine: eng,
-          sql_dialect: sqlDialect,
+          sql_dialect: activeDialect,
           codegen_mode: codegenMode,
           generation_mode: 'cleanse_only',
         }),
@@ -687,7 +744,7 @@ export default function EtlGenerationPanel({
           body: JSON.stringify({
             session_id: sessionId,
             engine: eng,
-            sql_dialect: sqlDialect,
+            sql_dialect: activeDialect,
             codegen_mode: codegenMode,
             generation_mode: 'transform_only',
           }),
@@ -844,34 +901,72 @@ export default function EtlGenerationPanel({
     ]
   };
 
-  return (
-    <div className={shell}>
-      <div className="mb-4 flex items-center gap-3">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#0070AD] text-white shadow-md">
-          <FaCode className="text-lg" />
-        </div>
-        <div>
-          <h3 className={`text-lg font-black tracking-tight ${dm ? 'text-white' : 'text-zinc-900'}`}>{heading}</h3>
-          <p className={`text-[12.5px] font-medium ${sub}`}>{flowSubtitle}</p>
-        </div>
-      </div>
+      const isStepDisabled = (s: Step) => {
+        if (s === 'rules') return false;
+        if (s === 'plan') return !plan;
+        if (s === 'preview') return !preview;
+        if (s === 'code') return !phase1Code;
+        return true;
+      };
 
-      <div className="mb-4 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest">
-        {stepBadges.map((s) => (
-          <span
-            key={s}
-            className={`rounded-full px-3 py-1 ${
-              step === s
-                ? 'bg-[#0070AD] text-white'
-                : dm
-                  ? 'bg-white/10 text-white/50'
-                  : 'bg-black/5 text-black/40'
-            }`}
-          >
-            {badgeLabel(s)}
-          </span>
-        ))}
-      </div>
+      return (
+        <div className={shell}>
+          <div className="mb-4 flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#0070AD] text-white shadow-md">
+              <FaCode className="text-lg" />
+            </div>
+            <div>
+              <h3 className={`text-lg font-black tracking-tight ${dm ? 'text-white' : 'text-zinc-900'}`}>{heading}</h3>
+              <p className={`text-[12.5px] font-medium ${sub}`}>{flowSubtitle}</p>
+            </div>
+          </div>
+
+          <div className="mb-4 flex flex-wrap gap-2 text-[10px] font-black uppercase tracking-widest">
+            {stepBadges.map((s) => {
+              const active = step === s;
+              const disabled = isStepDisabled(s);
+
+              if (active) {
+                return (
+                  <span
+                    key={s}
+                    className="rounded-full px-3 py-1 bg-[#0070AD] text-white shadow-sm"
+                  >
+                    {badgeLabel(s)}
+                  </span>
+                );
+              }
+
+              if (disabled) {
+                return (
+                  <span
+                    key={s}
+                    className={`rounded-full px-3 py-1 cursor-not-allowed ${
+                      dm ? 'bg-white/5 text-white/20' : 'bg-black/[0.02] text-black/25'
+                    }`}
+                    title={`Complete preceding steps to unlock ${badgeLabel(s)}`}
+                  >
+                    🔒 {badgeLabel(s)}
+                  </span>
+                );
+              }
+
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setStep(s)}
+                  className={`rounded-full px-3 py-1 transition-all duration-150 hover:scale-105 cursor-pointer ${
+                    dm
+                      ? 'bg-white/10 hover:bg-white/20 text-white/80 hover:text-white'
+                      : 'bg-black/5 hover:bg-black/10 text-zinc-700 hover:text-zinc-900 border border-black/5'
+                  }`}
+                >
+                  {badgeLabel(s)}
+                </button>
+              );
+            })}
+          </div>
 
       <AnimatePresence>
         {(pipelineMode === 'full' || pipelineMode === 'requirements') && step === 'rules' && (
@@ -902,7 +997,6 @@ export default function EtlGenerationPanel({
                         ['python', 'Python'],
                         ['sql', 'SQL'],
                         ['spark', 'PySpark'],
-                        ['adf', 'ADF'],
                       ] as const
                     ).map(([k, lab]) => (
                       <button
@@ -1356,6 +1450,12 @@ export default function EtlGenerationPanel({
               onCopy={copyCode}
               onDownload={downloadCode}
               onForceUnlock={() => setForceUnlock(true)}
+              onCodeChange={handleCodeChange}
+              engine={engine}
+              sqlDialect={sqlDialect}
+              onEngineChange={handleEngineChange}
+              saveStatus={saveStatus}
+              isGenerating={busy}
             />
 
             <DuckDbDiffPanel diff={duckdbDiff} darkMode={dm} />
