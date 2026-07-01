@@ -1267,7 +1267,7 @@ def etl_execute_sql(
             "message": "No generated SQL code found for this session. Generate code first."
         }
 
-    plan = flow.get("approved_plan")
+    plan = flow.get("approved_plan") or flow.get("plan")
     table_names = []
     if plan and isinstance(plan, dict) and "datasets" in plan:
         table_names = list(plan["datasets"].keys())

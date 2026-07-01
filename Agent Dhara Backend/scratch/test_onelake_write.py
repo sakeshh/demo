@@ -6,7 +6,7 @@ import os
 os.environ["PYTHONIOENCODING"] = "utf-8"
 from dotenv import load_dotenv
 load_dotenv()
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 WORKSPACE_ID = os.getenv("FABRIC_WORKSPACE_ID", "04a585ce-f0ec-4a3a-9db2-e237711fd9e7")
 LAKEHOUSE_ID = os.getenv("FABRIC_LAKEHOUSE_NAME", "abd8c72d-b5aa-4b58-83bd-fb97587de47e")
@@ -71,7 +71,7 @@ try:
 
     target = (
         f"abfss://{WORKSPACE_ID}@onelake.dfs.fabric.microsoft.com"
-        f"/{LAKEHOUSE_ID}/Tables/dhara_connectivity_test"
+        f"/{LAKEHOUSE_ID}/Tables/dbo/dhara_connectivity_test"
     )
 
     storage_opts = {

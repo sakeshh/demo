@@ -113,12 +113,19 @@ def write_to_lakehouse(df: pd.DataFrame, table_name: str, mode: str = "overwrite
         logger.error(err_msg)
         return {"ok": False, "error": "MISSING_CONFIG", "message": err_msg}
 
-    # Format table name to be safe for folders (alphanumeric and underscores)
-    safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name.split(".")[-1])
+    # Parse schema and table name (default schema is 'dbo')
+    parts = table_name.split(".", 1)
+    if len(parts) == 2:
+        schema = re.sub(r'[^a-zA-Z0-9_]', '_', parts[0])
+        safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '_', parts[1])
+    else:
+        schema = "dbo"
+        safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '_', parts[0])
+
     lakehouse_folder = get_lakehouse_folder(lakehouse)
 
-    # Build the ABFSS target URI
-    target_uri = f"abfss://{workspace}@onelake.dfs.fabric.microsoft.com/{lakehouse_folder}/Tables/{safe_table_name}"
+    # Build the ABFSS target URI preserving the schema
+    target_uri = f"abfss://{workspace}@onelake.dfs.fabric.microsoft.com/{lakehouse_folder}/Tables/{schema}/{safe_table_name}"
     
     logger.info(f"Preparing to write to Fabric Lakehouse: {target_uri}")
 

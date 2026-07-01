@@ -94,10 +94,10 @@ class TestFabricLakehouseConnector(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(res["status"], "success")
         self.assertEqual(res["table"], "Customers_Clean")
-        self.assertEqual(res["uri"], "abfss://ws-123@onelake.dfs.fabric.microsoft.com/Dhara_Lake.Lakehouse/Tables/Customers_Clean")
+        self.assertEqual(res["uri"], "abfss://ws-123@onelake.dfs.fabric.microsoft.com/Dhara_Lake.Lakehouse/Tables/dbo/Customers_Clean")
         
         mock_deltalake.write_deltalake.assert_called_once_with(
-            "abfss://ws-123@onelake.dfs.fabric.microsoft.com/Dhara_Lake.Lakehouse/Tables/Customers_Clean",
+            "abfss://ws-123@onelake.dfs.fabric.microsoft.com/Dhara_Lake.Lakehouse/Tables/dbo/Customers_Clean",
             df,
             mode="overwrite",
             storage_options={
