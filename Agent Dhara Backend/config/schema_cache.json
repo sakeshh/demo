@@ -1,10 +1,14 @@
 {
-    "dbo.students_raw": {
-        "student_id": "object",
-        "name": "object",
-        "email": "object",
-        "dob": "object",
-        "department": "object",
-        "phone": "object"
+    "dbo.EmployeeData": {
+        "EmployeeID": "object",
+        "EmployeeName": "object",
+        "Email": "object",
+        "Phone": "object",
+        "Department": "object",
+        "JobTitle": "object",
+        "HireDate": "object",
+        "Salary": "object",
+        "Location": "object",
+        "Status": "object"
     }
 }

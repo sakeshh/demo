@@ -28,6 +28,23 @@ except ImportError:
 APPROVAL_REQUIRED_OPS = ["DELETE", "UPDATE", "MERGE", "TRUNCATE", "DROP"]
 
 
+def _extract_pyodbc_error(exc: Exception) -> str:
+    """
+    Extract the most informative error string from a pyodbc exception.
+    pyodbc sometimes raises HY000 'The driver did not supply an error!' when
+    the real SQL Server diagnostic is buried in exc.args or the cursor messages.
+    Falls back to str(exc) for non-pyodbc exceptions.
+    """
+    if not isinstance(exc, pyodbc.Error):
+        return str(exc)
+    parts: List[str] = []
+    for arg in exc.args:
+        part = str(arg).strip()
+        if part and part not in parts:
+            parts.append(part)
+    return " | ".join(parts) if parts else str(exc)
+
+
 def get_connection(connection_string: str | None = None) -> pyodbc.Connection:
     """
     Build connection from env DHARA_AZURE_SQL_CONN_STR or passed string.
@@ -213,12 +230,28 @@ def execute_sql_batch(
         }
     except Exception as e:
         duration_ms = (time.perf_counter() - t0) * 1000
+        error_str = _extract_pyodbc_error(e)
+        # Also drain any pending server messages from cursor for extra context
+        if isinstance(e, pyodbc.Error):
+            try:
+                extra_parts = [error_str]
+                pending = getattr(cursor, "messages", None) or []
+                for msg in pending:
+                    part = str(msg[1]).strip() if isinstance(msg, tuple) and len(msg) >= 2 else str(msg).strip()
+                    if part and part not in extra_parts:
+                        extra_parts.append(part)
+                if len(extra_parts) > 1:
+                    error_str = " | ".join(extra_parts)
+            except Exception:
+                pass
+        logger.error("execute_sql_batch failed (%.0fms): %s", duration_ms, error_str)
         return {
             "rows_affected": -1,
             "messages": [],
-            "error": str(e),
+            "error": error_str,
             "duration_ms": round(duration_ms, 2),
         }
+
 
 
 def run_transactional_sql(
@@ -351,8 +384,33 @@ def run_transactional_sql(
 
         # Commit on success (only if not in autocommit mode)
         if not conn.autocommit:
-            conn.commit()
-            
+            try:
+                conn.commit()
+            except Exception as commit_err:
+                # HY000 is often raised here when a stored proc's BEGIN CATCH
+                # executed THROW/RAISERROR — the error is deferred to commit time.
+                commit_error_str = _extract_pyodbc_error(commit_err)
+                logger.error("conn.commit() raised an error — stored proc likely hit BEGIN CATCH: %s", commit_error_str)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return {
+                    "ok": False,
+                    "run_id": rid,
+                    "dry_run": False,
+                    "requires_approval": app_check["requires_approval"],
+                    "ops_found": app_check["ops_found"],
+                    "transaction_committed": False,
+                    "rollback_reason": commit_error_str,
+                    "batches_run": len(batch_results),
+                    "total_rows_affected": total_rows_affected,
+                    "total_duration_ms": round(total_duration, 2),
+                    "batch_results": batch_results,
+                    "error": f"commit() failed: {commit_error_str}",
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                }
+
         return {
             "ok": True,
             "run_id": rid,
@@ -370,6 +428,8 @@ def run_transactional_sql(
         }
 
     except Exception as e:
+        error_str = _extract_pyodbc_error(e)
+        logger.error("run_transactional_sql outer exception: %s", error_str)
         if conn is not None and not conn.autocommit:
             try:
                 conn.rollback()
@@ -382,12 +442,12 @@ def run_transactional_sql(
             "requires_approval": app_check["requires_approval"],
             "ops_found": app_check["ops_found"],
             "transaction_committed": False,
-            "rollback_reason": str(e),
+            "rollback_reason": error_str,
             "batches_run": len(batch_results),
             "total_rows_affected": total_rows_affected,
             "total_duration_ms": round(total_duration, 2),
             "batch_results": batch_results,
-            "error": str(e),
+            "error": error_str,
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         }
     finally:

@@ -33,7 +33,22 @@ def _get_token(scope: str) -> str:
     client_secret = os.environ.get("FABRIC_CLIENT_SECRET")
     tenant_id = os.environ.get("FABRIC_TENANT_ID")
 
-    if client_id and client_secret and tenant_id:
+    def _is_placeholder(val: str | None) -> bool:
+        if not val:
+            return True
+        s = val.strip().strip("<>").lower()
+        if not s or "your-service-principal" in s or "placeholder" in s or "client-secret-value-here" in s or "client-id-here" in s:
+            return True
+        return False
+
+    is_sp_configured = (
+        client_id and client_secret and tenant_id and
+        not _is_placeholder(client_id) and
+        not _is_placeholder(client_secret) and
+        not _is_placeholder(tenant_id)
+    )
+
+    if is_sp_configured:
         cred = ClientSecretCredential(
             tenant_id=tenant_id,
             client_id=client_id,

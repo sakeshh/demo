@@ -115,5 +115,51 @@
       "recommended": false,
       "description": "Fill missing or implausible age values with a default value, such as the median age, after manual review."
     }
+  ],
+  "date_clumping_jan1": [
+    {
+      "id": "keep_as_is",
+      "label": "Keep as-is (skip in ETL)",
+      "action": "noop",
+      "recommended": false,
+      "description": "No transform; document in runbook."
+    },
+    {
+      "id": "option_1",
+      "label": "Flag Outliers in OrderDate",
+      "action": "flag_outliers",
+      "recommended": true,
+      "description": "Add a boolean audit column to flag the outlier values in the OrderDate column that fall on January 1, indicating they may be default or placeholder dates."
+    },
+    {
+      "id": "option_2",
+      "label": "Zero to Null for OrderDate",
+      "action": "zero_to_null",
+      "recommended": false,
+      "description": "Replace any sentinel or placeholder values in the OrderDate column with NULL to clean the dataset."
+    }
+  ],
+  "weekend_date_anomaly": [
+    {
+      "id": "keep_as_is",
+      "label": "Keep as-is (skip in ETL)",
+      "action": "noop",
+      "recommended": false,
+      "description": "No transform; document in runbook."
+    },
+    {
+      "id": "option_1",
+      "label": "Flag Weekend Dates",
+      "action": "flag_outliers",
+      "recommended": true,
+      "description": "Add a boolean audit column to flag the dates that fall on weekends, allowing for manual review of these records."
+    },
+    {
+      "id": "option_2",
+      "label": "Exclude Weekend Dates from Output",
+      "action": "exclude_column",
+      "recommended": false,
+      "description": "Exclude the OrderDate column from the output to prevent weekend dates from affecting downstream processes."
+    }
   ]
 }

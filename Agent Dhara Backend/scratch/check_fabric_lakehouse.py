@@ -41,11 +41,23 @@ def main():
         from azure.identity import DefaultAzureCredential
         print("azure-identity is installed [OK]")
         
-        if not client_id or not client_secret:
-            print("\nNo Service Principal configured. Trying DefaultAzureCredential (Azure CLI)...")
+        def _is_placeholder(val: str | None) -> bool:
+            if not val:
+                return True
+            s = val.strip().strip("<>").lower()
+            return not s or "your-service-principal" in s or "placeholder" in s or "client-secret-value-here" in s or "client-id-here" in s
+
+        is_sp_set = client_id and client_secret and not _is_placeholder(client_id) and not _is_placeholder(client_secret)
+
+        if not is_sp_set:
+            print("\nNo Service Principal configured or placeholders found. Trying DefaultAzureCredential...")
             try:
                 cred = DefaultAzureCredential()
-                token = cred.get_token("https://storage.azure.com/.default", tenant_id=tenant_id)
+                clean_tenant = tenant_id if (tenant_id and not _is_placeholder(tenant_id)) else None
+                if clean_tenant:
+                    token = cred.get_token("https://storage.azure.com/.default", tenant_id=clean_tenant)
+                else:
+                    token = cred.get_token("https://storage.azure.com/.default")
                 print(f"[OK] Successfully obtained storage token via DefaultAzureCredential")
                 print(f"  Token expires at: {token.expires_on}")
             except Exception as e:

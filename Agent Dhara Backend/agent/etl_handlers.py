@@ -1303,6 +1303,18 @@ def etl_execute_sql(
         # ── Fabric Lakehouse Mirror Hook ──
         from connectors.fabric_lakehouse_connector import is_fabric_mirror_enabled, write_to_lakehouse
         if is_fabric_mirror_enabled():
+            _fabric_client_id = os.environ.get("FABRIC_CLIENT_ID", "").strip().strip("<>")
+            _fabric_client_secret = os.environ.get("FABRIC_CLIENT_SECRET", "").strip().strip("<>")
+            
+            def _is_placeholder_local(val: str) -> bool:
+                s = val.strip().lower()
+                return not s or "your-service-principal" in s or "placeholder" in s or "client-secret-value-here" in s or "client-id-here" in s
+
+            is_sp_set = _fabric_client_id and _fabric_client_secret and not _is_placeholder_local(_fabric_client_id) and not _is_placeholder_local(_fabric_client_secret)
+
+            if not is_sp_set:
+                logger.info("Fabric Service Principal credentials not configured or are placeholders. Attempting DefaultAzureCredential fallback for OneLake upload...")
+            
             logger.info("Fabric Lakehouse Mirror is enabled. Starting mirror process...")
             mirror_results = []
             conn = None

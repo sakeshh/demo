@@ -31,6 +31,15 @@ def _is_uuid(val: str) -> bool:
     val_clean = val.lower().strip()
     return bool(re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", val_clean))
 
+def _is_placeholder(val: Optional[str]) -> bool:
+    """Check if the string is a default template/placeholder value."""
+    if not val:
+        return True
+    s = val.strip().strip("<>").lower()
+    if not s or "your-service-principal" in s or "placeholder" in s or "client-secret-value-here" in s or "client-id-here" in s:
+        return True
+    return False
+
 def get_lakehouse_folder(lakehouse: str) -> str:
     """
     Determine the physical directory name of the Lakehouse.
@@ -62,22 +71,23 @@ def get_fabric_storage_options() -> Dict[str, str]:
     }
 
     # If Service Principal is configured, use it
-    if client_id and client_secret:
+    if client_id and client_secret and not _is_placeholder(client_id) and not _is_placeholder(client_secret):
         logger.info("Using Service Principal authentication for Fabric OneLake.")
         options["client_id"] = client_id
         options["client_secret"] = client_secret
-        if tenant_id:
+        if tenant_id and not _is_placeholder(tenant_id):
             options["tenant_id"] = tenant_id
         return options
 
     # Fallback: Try fetching bearer token using DefaultAzureCredential (e.g. Azure CLI)
-    logger.info("Service Principal credentials not fully configured. Attempting token-based authentication via DefaultAzureCredential...")
+    logger.info("Service Principal credentials not fully configured or are placeholders. Attempting token-based authentication via DefaultAzureCredential...")
     try:
         from azure.identity import DefaultAzureCredential
-        if tenant_id:
-            os.environ["AZURE_TENANT_ID"] = tenant_id
+        clean_tenant = tenant_id if (tenant_id and not _is_placeholder(tenant_id)) else None
+        if clean_tenant:
+            os.environ["AZURE_TENANT_ID"] = clean_tenant
             cred = DefaultAzureCredential()
-            token_response = cred.get_token("https://storage.azure.com/.default", tenant_id=tenant_id)
+            token_response = cred.get_token("https://storage.azure.com/.default", tenant_id=clean_tenant)
         else:
             cred = DefaultAzureCredential()
             token_response = cred.get_token("https://storage.azure.com/.default")
