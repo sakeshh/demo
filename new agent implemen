@@ -1,0 +1,108 @@
+Everyone
+ 
+Implementation Plan - AI Data Team Command Matrix & Specialized Agent Chat
+This plan details the end-to-end specifications to consolidate the separate "chat vs pipeline" pages into a single, unified Universal AI Data Team Workspace. The workflow stages are represented as 6 specialized AI agents (E, D, S, R, T, X) overseen by the universal supervisor Agent Dhara. The chat drawer will dynamically adapt to the active agent, supporting natural to-and-fro conversations, background agent-to-agent coordination, and human-in-the-loop approvals before handing off tasks to the next expert.
+User Review Required
+IMPORTANT
+Agentic Collaboration & Background Coordination
+Coordination: When you are working with the Extraction Specialist (E) and ask to check quality, E doesn't just say "no". E coordinates with the Data Quality Auditor (D), runs the data quality assessment in the background, reports a summary of the findings (e.g., "I have run the quality audit. We found 3 high-severity issues. Let me transition you to Bianca, our Data Quality Auditor..."), and then hands you off.
+Human-in-the-Loop Approvals: When an agent finishes their task (e.g., Agent S infers semantics, Agent T generates ETL code), they will present the result in the chat and ask for your approval (e.g., "Does this generated code look correct? Please approve so I can hand this over to Thomas, our Deployment Executor (X)...").
+To-and-Fro Conversations: The chat is fully interactive. If you ask Agent D to modify a quality rule or tell Agent S to change a column classification (e.g., "Change customer_id from email to numeric"), the agent performs the modification, updates the workspace context, and shows you the updated result in the chat.
+IMPORTANT
+AI Data Team Command Matrix (6 Specialized Agents) Rather than a simple vertical stepper, we will design a futuristic Control Hub Cluster containing 6 Agent cards with stylized letter monograms and proper titles:
+Extraction Specialist (E): Connects to sources (Azure SQL, Blob, Filesystem) and extracts raw data.
+Data Quality Auditor (D): Runs data profiling, audits quality anomalies, and validates the Great Expectations DQ Gate.
+Semantic Specialist (S): Auto-infers column datatypes (e.g. Email, Phone, Address) using LLM enrichment.
+Requirements Specialist (R): Translates natural language requirements into structured rules.
+Transformation Engineer (T): Auto-generates clean, optimized T-SQL or Python/Pandas ETL script code.
+Deployment Executor (X): Performs dry runs, deploys statements directly on Azure SQL, and mirrors to Fabric Lakehouse.
+Roadmap & Future Extensions: Azure Blob & MS Fabric Pipeline
+To future-proof the architecture for Azure Blob Storage and Microsoft Fabric, we will layout the expansion path for the 6 agents to support file-based lakehouse ingestion and PySpark processing:
+[Azure Blob Storage (Raw Files)]             │             │ (Agent E: Fabric Shortcut / Data Pipeline Copy)             ▼[Fabric OneLake Files (Raw Zone)]             │             │ (Agent T: Generates PySpark ETL Code)             ▼[Fabric Spark Notebook Executing PySpark]             │             │ (Agent X: Triggers Spark Execution)             ▼[Fabric Lakehouse Tables (Cleaned Delta Tables)]             │             ▼[Power BI & Downstream Consumers]
+Agent-Specific Roles in Blob/Fabric Ingestion:
+Extraction Specialist (E):
+Identifies and classifies files into three categories:
+Native ETL-ready (Phase 1): CSV, TSV/PSV/delimited text, JSON/JSONL, Parquet.
+Supported with Extra Handling: Excel, XML, Avro, ORC.
+Excluded (Non-ETL): PDF, DOCX, PPTX, Images, Audio, Video, Binaries (flagged as unstructured parsing problems, not data cleaning candidates).
+automates linking files to Fabric OneLake Files (Raw Zone) using Shortcuts or Data Pipeline copies.
+Data Quality Auditor (D):
+Profiles file datasets and runs custom quality audits directly on pandas/parquet metadata snapshots.
+Transformation Engineer (T):
+Generates optimized PySpark transformation code to clean raw files and format them for Delta lake ingestion.
+Deployment Executor (X):
+Triggers the execution of Fabric Spark Notebooks hosting the PySpark scripts to output clean Delta tables in Fabric Lakehouse Tables (Cleaned Zone).
+Proposed Changes
+Frontend (Next.js)
+[MODIFY] page.tsx
+Redirect login/signup straight to /data-pipeline.
+[MODIFY] Sidebar.tsx
+Simplify sidebar to focus on the main workspace.
+[MODIFY] page.tsx
+Define states: activeAgent ('E' | 'D' | 'S' | 'R' | 'T' | 'X') and isChatOpen (boolean).
+Render the AI Data Team Command Matrix header section:
+Connect cards representing the 6 agents horizontally/in a grid.
+Style monograms (E, D, S, R, T, X) with color-coded ambient glowing rings.
+Map the active agent's panel in the workspace content area:
+activeAgent === 'E' -> DatabaseSelector / FileSelector.
+activeAgent === 'D' -> DQGateDashboard / DataAssessmentReport.
+activeAgent === 'S' -> SemanticReviewPanel.
+activeAgent === 'R' -> BusinessRequirementsPanel / RequirementsPhasePanel.
+activeAgent === 'T' -> EtlGenerationPanel / ETLCodeTabView.
+activeAgent === 'X' -> SQL execution controls, dry run results, and Fabric lakehouse status.
+Add the Agent Dhara: Ask me anything header capsule button.
+Integrate the slide-over Chat Drawer. Pass activeAgent and a callback onRedirectAgent to the <ChatWindow> component.
+[MODIFY] ChatWindow.tsx
+Accept new props: { activeAgent, onRedirectAgent }.
+Dynamically update placeholders: Ask ${agentName} anything....
+Include activeAgent in the JSON body of the POST /api/chat request.
+Divide the drawer window layout into a two-pane split:
+Left Pane (70% width): Scrollable message history and text input box.
+Right Pane (30% width): Active Agent Profile Panel:
+Renders the avatar photo and title.
+Renders the bio description and suggested questions.
+Inspect response payloads: if the API response contains payload: { redirect_agent: 'D' } (or another agent code), invoke the onRedirectAgent callback to dynamically hand off the session.
+Backend (FastAPI / LangGraph)
+[MODIFY] mcp_server.py
+Update ChatPayload schema to include an optional active_agent: Optional[str] = "E" field.
+Pass active_agent from /chat to run_chat().
+[MODIFY] agent_system_prompt.py
+Define GENERAL_GUIDANCE_SYSTEM_PROMPT describing the roles of the 6 Agents (E, D, S, R, T, X) and establishing Agent Dhara's supervisory role.
+Define custom system prompts for all 6 agents:
+Extraction Specialist (E): Focuses on data retrieval, schema structures, metadata fields, row counts, and specific cell/row lookups. Capable of executing direct SQL/Pandas schema queries.
+Data Quality Auditor (D): Focuses on anomalies, profiling results, outlier analysis, and Great Expectations checks.
+Semantic Specialist (S): Focuses on classification tags (e.g. phone, emails) and overrides.
+Requirements Specialist (R): Focuses on business logic requirements mapping.
+Transformation Engineer (T): Focuses on Python/Pandas/T-SQL code generation and code edits.
+Deployment Executor (X): Focuses on dry runs and Azure SQL deployments.
+Define routing instructions that direct the LLM to return {"redirect_agent": "[Target]"} when executing a hand-off transition.
+[MODIFY] chat_graph.py
+Update run_chat() signature to accept active_agent: str = "E".
+Add a new node convo_general_guidance in build_chat_graph().
+Update _node_route():
+Detect user queries requiring data quality findings (e.g. nulls, duplicates) before assessment has been run. If tables/files are selected, automatically rewrite the action to assess_selected_tables / assess_selected_files to run it in the background first, then return results.
+If a user sends a query outside the active agent's domain, invoke a hand-off routine:
+E.g. User asks E to check quality: E triggers the assessment background job first, returns a summary of the findings, and sets payload: { redirect_agent: 'D' } to transition to D.
+Implement _node_convo_general_guidance():
+Read active_agent and load the corresponding specialist prompt.
+Return the hand-off message and the redirect payload ({"redirect_agent": "[Target]"}) to trigger the UI switch.
+[MODIFY] langchain_tool_router.py
+Allow classification of data-quality intents even if has_assessment is False, provided selection context is present.
+[MODIFY] conversational_intents.py
+Update classify_intent() to let data quality intent checks (e.g. duplicate, null checks) proceed to classification if tables/files are selected.
+Verification Plan
+Automated Tests
+Backend tests:
+Next.js build verification:
+Manual Verification
+Login to the application and ensure you land on the /data-pipeline workspace showing the AI Data Team Command Matrix.
+Select Agent E (Extraction Specialist) to configure database/files.
+Open the chat drawer. Confirm it says "Ask Extraction Specialist anything..." and lists E-specific suggested questions.
+Ask: "what is the schema of the selected tables?" and verify it returns column details.
+Ask: "are there any duplicate rows?"
+Verify that E responds: "I specialize in extraction. Let me run the quality check and hand you over to the Data Quality Auditor (D)...", runs the background job, and the UI automatically switches the active agent to D, opens the DQ report, and fetches duplicates.
+Ask D to modify a validation threshold (e.g. "Set DQ threshold to 80%") and verify that D executes the change and updates the UI state.
+ 
+17:09 Suhail, Shaik started a meeting.
+
+ 
